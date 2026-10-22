@@ -19,6 +19,7 @@ impl Cli {
             .env("PAI_CONFIG_DIR", self.dir.path().join("config"))
             .env("PAI_KEYSTORE", "file")
             .env("PAI_PREFETCH", "0")
+            .env("PAI_OPEN_BROWSER", "0")
             .env("PAI_PROXY_PORT", self.port.to_string())
             .output()
             .unwrap()
@@ -111,6 +112,14 @@ fn binary_end_to_end() {
         settings.contains("\"apiKeyHelper\"") && settings.contains(&format!("http://127.0.0.1:{port}")),
         "{settings}"
     );
+
+    relay.remove_all_devices();
+    let status = text(&cli.run(&["status"]).stdout);
+    assert!(
+        status.contains("device removed, pair again") && status.contains("DawonAI web app: https://app.privacyai.example/"),
+        "{status}"
+    );
+    assert!(!cli.dir.path().join("config/web-app-opened").exists(), "PAI_OPEN_BROWSER=0 keeps the browser closed");
 
     let out = cli.run(&["unpair"]);
     assert!(out.status.success());

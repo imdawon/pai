@@ -32,6 +32,9 @@ enum Command {
         /// Model API URL [env: PAI_API_URL] [default: https://api.privacyai.example]
         #[arg(long)]
         api: Option<String>,
+        /// DawonAI web app URL, which pai opens if this device's link is removed [env: PAI_APP_URL] [default: app.<domain> for a relay at relay.<domain>]
+        #[arg(long)]
+        app: Option<String>,
         /// Name shown in the web app's device list [default: pai on <hostname>]
         #[arg(long)]
         name: Option<String>,
@@ -83,6 +86,11 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("pai: {e}");
+            if matches!(e, Error::DeviceRemoved)
+                && let Some(cfg) = Env::from_process().ok().and_then(|env| env.config().ok().flatten())
+            {
+                eprintln!("pai: DawonAI web app: {}/", cfg.app_url());
+            }
             ExitCode::from(e.exit_code() as u8)
         }
     }
@@ -99,6 +107,7 @@ fn run(command: Command) -> Result<(), Error> {
             code,
             relay,
             api,
+            app,
             name,
             #[cfg(feature = "test-mode")]
             test_ca,
@@ -114,6 +123,7 @@ fn run(command: Command) -> Result<(), Error> {
                 &code,
                 relay.as_deref(),
                 api.as_deref(),
+                app.as_deref(),
                 name.as_deref(),
                 test,
             )?;

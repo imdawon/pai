@@ -15,6 +15,7 @@ fn paired(relay: &FakeRelay) -> TestEnv {
         "abcd-2345",
         Some(&relay.url),
         Some("http://api.test/"),
+        None,
         Some("test box"),
         None,
     )
@@ -186,20 +187,112 @@ fn unpaid_account() {
     );
 }
 
+/// What the opener was asked to open: the web app's root, by the OS's opener.
+fn opened(t: &TestEnv) -> Vec<String> {
+    let opener = if cfg!(target_os = "macos") {
+        "open "
+    } else if cfg!(windows) {
+        "cmd /c start  "
+    } else {
+        "xdg-open "
+    };
+    let recorded = t.env.commands.recorded();
+    assert!(recorded.iter().all(|c| c.starts_with(opener)), "{recorded:?}");
+    recorded
+}
+
 #[test]
 fn removed_device() {
     let relay = FakeRelay::start(CODE);
-    let t = paired(&relay);
+    let mut t = paired(&relay);
     relay.remove_all_devices();
-    let err = app::credential(&t.env, false).unwrap_err();
+    let err = app::token(&t.env).unwrap_err();
     assert!(matches!(err, Error::DeviceRemoved), "{err:?}");
     assert_eq!(err.exit_code(), 4);
-    assert!(err.to_string().starts_with("device removed, pair again"));
-    assert!(app::status(&t.env).unwrap().plan.contains("device removed"));
+    let msg = err.to_string();
+    assert!(msg.starts_with("device removed, pair again"));
+    assert!(msg.contains("unused for 30 days") && msg.contains("Account > Set up a coding tool"), "{msg}");
+
+    // The web app opens once, and the day is noted so it doesn't open again today.
+    assert_eq!(opened(&t).len(), 1);
+    assert!(opened(&t)[0].ends_with(" https://app.privacyai.example/"), "{:?}", opened(&t));
+    let marker = std::fs::read_to_string(t.env.paths.web_app_opened_file()).unwrap();
+    assert_eq!(marker, today().to_string());
+    app::credential(&t.env, false).unwrap_err();
+    let status = app::status(&t.env).unwrap();
+    assert!(status.plan.contains("device removed") && status.device_removed);
+    let shown = status.to_string();
+    assert!(shown.contains("device removed, pair again") && shown.contains("DawonAI web app: https://app.privacyai.example/"), "{shown}");
+    assert_eq!(opened(&t).len(), 1);
+
+    // And again the next day.
+    t.env.clock = Clock::Fixed(now_unix() + 86_400);
+    app::credential(&t.env, false).unwrap_err();
+    assert_eq!(opened(&t).len(), 2);
 
     let notes = app::unpair(&t.env).unwrap();
     assert!(notes[0].contains("already removed"), "{notes:?}");
     assert!(t.env.config().unwrap().is_none());
+    assert!(!t.env.paths.web_app_opened_file().exists());
+}
+
+#[test]
+fn removed_device_seen_by_the_proxy_opens_the_web_app() {
+    let relay = FakeRelay::start(CODE);
+    let t = paired(&relay);
+    relay.remove_all_devices();
+    let key = app::local_key(&t.env).unwrap();
+    let env = t.env.clone();
+    std::thread::spawn(move || pai::proxy::run(env));
+    let base = pai::proxy::url(&t.env);
+    let http = reqwest::blocking::Client::builder().no_proxy().build().unwrap();
+    let up = (0..100).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        http.get(format!("{base}/pai/health")).bearer_auth(&key).send().is_ok_and(|r| r.status() == 200)
+    });
+    assert!(up, "the proxy started");
+
+    for _ in 0..2 {
+        let r = http.post(format!("{base}/v1/messages")).header("x-api-key", &key).body("{}").send().unwrap();
+        assert_eq!(r.status(), 401);
+        assert!(r.text().unwrap().contains("device removed, pair again"));
+    }
+    let _ = http.post(format!("{base}/pai/stop")).bearer_auth(&key).send();
+    assert_eq!(opened(&t).len(), 1);
+}
+
+#[test]
+fn the_web_app_stays_closed_with_pai_open_browser_0() {
+    let relay = FakeRelay::start(CODE);
+    let mut t = paired(&relay);
+    t.env.vars.insert("PAI_OPEN_BROWSER".into(), "0".into());
+    relay.remove_all_devices();
+    app::token(&t.env).unwrap_err();
+    assert!(opened(&t).is_empty());
+    assert!(!t.env.paths.web_app_opened_file().exists());
+}
+
+#[test]
+fn web_app_address() {
+    use pai::config::{app_url_for_relay, openable_url};
+    assert_eq!(app_url_for_relay("https://relay.privacyai.example"), "https://app.privacyai.example");
+    assert_eq!(app_url_for_relay("https://relay.staging.example:8443/prefix"), "https://app.staging.example:8443");
+    assert_eq!(app_url_for_relay("http://127.0.0.1:8787"), "https://app.privacyai.example");
+    assert_eq!(app_url_for_relay("https://relays.example"), "https://app.privacyai.example");
+    assert!(openable_url("https://app.privacyai.example/"));
+    for bad in ["file:///etc/passwd", "https://a.example/&calc", "https://a.example/\"x", "javascript:alert(1)", "https://a .example"] {
+        assert!(!openable_url(bad), "{bad}");
+    }
+
+    let relay = FakeRelay::start(CODE);
+    let t = TestEnv::new();
+    let err = app::pair(&t.env, CODE, Some(&relay.url), None, Some("https://x.example/&calc"), None, None).unwrap_err();
+    assert!(err.to_string().contains("isn't one pai can open"), "{err}");
+    let mut t = TestEnv::new();
+    t.env.vars.insert("PAI_APP_URL".into(), "https://app.staging.example/".into());
+    let cfg = app::pair(&t.env, CODE, Some(&relay.url), None, None, None, None).unwrap();
+    assert_eq!(cfg.app_url(), "https://app.staging.example");
+    assert_eq!(t.env.config().unwrap().unwrap().app_url.as_deref(), Some("https://app.staging.example"));
 }
 
 #[test]
@@ -230,18 +323,18 @@ fn pairing_errors() {
     let relay = FakeRelay::start(CODE);
     let t = TestEnv::new();
     assert!(matches!(
-        app::pair(&t.env, "short", Some(&relay.url), None, None, None),
+        app::pair(&t.env, "short", Some(&relay.url), None, None, None, None),
         Err(Error::BadPairingCode)
     ));
-    let err = app::pair(&t.env, "ZZZZ-ZZZZ", Some(&relay.url), None, None, None).unwrap_err();
+    let err = app::pair(&t.env, "ZZZZ-ZZZZ", Some(&relay.url), None, None, None, None).unwrap_err();
     assert!(matches!(err, Error::PairingRejected(_)), "{err:?}");
     assert!(t.env.config().unwrap().is_none());
     assert!(t.env.keystore.get(DEVICE_KEY).unwrap().is_none());
 
-    app::pair(&t.env, CODE, Some(&relay.url), None, None, None).unwrap();
+    app::pair(&t.env, CODE, Some(&relay.url), None, None, None, None).unwrap();
     relay.add_code("ZZZZ0000");
     assert!(matches!(
-        app::pair(&t.env, "ZZZZ0000", Some(&relay.url), None, None, None),
+        app::pair(&t.env, "ZZZZ0000", Some(&relay.url), None, None, None, None),
         Err(Error::AlreadyPaired)
     ));
 }

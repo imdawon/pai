@@ -103,7 +103,7 @@ Tell the user to quit and restart the harness so it reads the new config:
 | `not paired` | 2 | Pair again: step 2. |
 | `plan not paid` | 3 | The user chooses a plan in the DawonAI web app. Then run the check again. |
 | `this account is suspended` | 3 | The account can't get new credentials. Tell the user. |
-| `device removed, pair again` | 4 | The device was removed in the web app, or went unused for 30 days. Run `pai unpair`, then step 2. |
+| `device removed, pair again` | 4 | The device was removed in the web app, or went unused for 30 days. `pai` opens the DawonAI web app once a day when this happens. Run `pai unpair`, then step 2. |
 | `relay unreachable` | 5 | Check the network, VPN or proxy, then run the check again. |
 | `this device has already collected 3 credentials today` | 1 | Wait for the time it gives, or for midnight UTC. |
 | `this computer's clock is more than 2 minutes off` | 1 | The user fixes the system time. |

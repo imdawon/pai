@@ -10,7 +10,9 @@ use pai_proto::{
 };
 use zeroize::Zeroizing;
 
-use crate::config::{Config, DEFAULT_API_URL, DEFAULT_RELAY_URL, Paths, TestMode, trim_url};
+use crate::config::{
+    Config, DEFAULT_API_URL, DEFAULT_RELAY_URL, Paths, TestMode, app_url_for_relay, openable_url, trim_url,
+};
 use crate::error::{Error, Result, io_err};
 use crate::keystore::{CREDENTIAL, DEVICE_KEY, Keystore, NEXT_CREDENTIAL, PROXY_KEY};
 use crate::relay::Relay;
@@ -167,6 +169,7 @@ pub fn pair(
     code: &str,
     relay_url: Option<&str>,
     api_url: Option<&str>,
+    app_url: Option<&str>,
     name: Option<&str>,
     test: Option<(&std::path::Path, &[String])>,
 ) -> Result<Config> {
@@ -184,6 +187,15 @@ pub fn pair(
     let api_url = api_url
         .map(trim_url)
         .unwrap_or_else(|| env.default_api_url());
+    let app_url = app_url
+        .or(env.var("PAI_APP_URL"))
+        .map(trim_url)
+        .unwrap_or_else(|| app_url_for_relay(&relay_url));
+    if !openable_url(&app_url) {
+        return Err(Error::Setup(format!(
+            "the DawonAI web app address {app_url} isn't one pai can open: use an https:// address"
+        )));
+    }
     let test: Option<TestMode> = match test {
         None => None,
         #[cfg(not(feature = "test-mode"))]
@@ -216,6 +228,7 @@ pub fn pair(
     let config = Config {
         relay_url,
         api_url,
+        app_url: Some(app_url),
         device_id: registered.device_id.clone(),
         account_id: registered.account_id,
         test,
@@ -271,7 +284,43 @@ fn lock(env: &Env) -> Result<fs::File> {
 pub fn credential(env: &Env, refresh: bool) -> Result<String> {
     let config = env.paired()?;
     let today = day_number(env.clock.now());
-    current_credential(env, &config, today, refresh)
+    let got = current_credential(env, &config, today, refresh);
+    if matches!(got, Err(Error::DeviceRemoved)) {
+        open_web_app(env, &config);
+    }
+    got
+}
+
+/// When this device's link is gone, the user has to pair again from Account in the DawonAI web
+/// app, so `pai` opens the web app in the default browser. At most once a UTC day, so a coding
+/// tool retrying `pai token` doesn't open a tab each time. Returns whether it opened it now;
+/// never fails the command. `PAI_OPEN_BROWSER=0` turns this off.
+pub fn open_web_app(env: &Env, config: &Config) -> bool {
+    if env.var("PAI_OPEN_BROWSER") == Some("0") {
+        return false;
+    }
+    // The web app has no link to its Account screen; it opens on the chat, with Account a click away.
+    let url = format!("{}/", config.app_url());
+    if !openable_url(&url) {
+        return false;
+    }
+    // Several `pai token` calls fail together; the lock lets only the first one open the browser.
+    let Ok(_lock) = lock(env) else {
+        return false;
+    };
+    let today = day_number(env.clock.now()).to_string();
+    let marker = env.paths.web_app_opened_file();
+    if fs::read_to_string(&marker).is_ok_and(|day| day.trim() == today) || fs::write(&marker, &today).is_err() {
+        return false;
+    }
+    let (program, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
+        ("open", &[url.as_str()])
+    } else if cfg!(windows) {
+        ("cmd", &["/c", "start", "", url.as_str()])
+    } else {
+        ("xdg-open", &[url.as_str()])
+    };
+    env.commands.start(program, args)
 }
 
 /// Which certificates `pai` trusts: the public certificate authorities and the pins this release
@@ -560,6 +609,8 @@ pub struct Status {
     pub service: String,
     pub trust: Trust,
     pub keystore: String,
+    /// The relay no longer knows this device: it went 30 days unused, or was removed in Account.
+    pub device_removed: bool,
 }
 
 pub fn status(env: &Env) -> Result<Status> {
@@ -575,12 +626,14 @@ pub fn status(env: &Env) -> Result<Status> {
             service: crate::service::describe(env),
             trust: trust(env, None),
             keystore,
+            device_removed: false,
         });
     };
     let today = day_number(env.clock.now());
     let credential_today = cached_credential(env, today).ok().flatten().is_some()
         || stored_credential(env, NEXT_CREDENTIAL, today).ok().flatten().is_some();
     let credential_tomorrow = stored_credential(env, NEXT_CREDENTIAL, today + 1).ok().flatten().is_some();
+    let mut device_removed = false;
     let plan = match env.device_key() {
         Err(e) => format!("unknown ({e})"),
         Ok(key) => match env
@@ -592,7 +645,11 @@ pub fn status(env: &Env) -> Result<Status> {
                 (Some(p), None) => format!("{p} ({}, not paid)", a.status),
                 (None, _) => format!("none ({})", a.status),
             },
-            Err(Error::DeviceRemoved) => "unknown (device removed, pair again)".into(),
+            Err(Error::DeviceRemoved) => {
+                device_removed = true;
+                open_web_app(env, &cfg);
+                "unknown (device removed, pair again)".into()
+            }
             Err(Error::RelayUnreachable(_)) => "unknown (relay unreachable)".into(),
             Err(e) => format!("unknown ({e})"),
         },
@@ -609,6 +666,7 @@ pub fn status(env: &Env) -> Result<Status> {
         service: crate::service::describe(env),
         trust: trust(env, Some(&cfg)),
         keystore,
+        device_removed,
     })
 }
 
@@ -645,7 +703,13 @@ impl std::fmt::Display for Status {
         }
         writeln!(f, "Proxy:      {}", self.proxy)?;
         writeln!(f, "Service:    {}", self.service)?;
-        writeln!(f, "Keystore:   {}", self.keystore)
+        writeln!(f, "Keystore:   {}", self.keystore)?;
+        if self.device_removed {
+            writeln!(f)?;
+            writeln!(f, "{}.", Error::DeviceRemoved)?;
+            writeln!(f, "DawonAI web app: {}/", c.app_url())?;
+        }
+        Ok(())
     }
 }
 
@@ -695,7 +759,7 @@ pub fn unpair(env: &Env) -> Result<Vec<String>> {
     env.keystore.delete(CREDENTIAL)?;
     env.keystore.delete(NEXT_CREDENTIAL)?;
     env.keystore.delete(PROXY_KEY)?;
-    for path in [env.paths.config_file(), env.paths.lock_file(), env.paths.test_ca_file()] {
+    for path in [env.paths.config_file(), env.paths.lock_file(), env.paths.test_ca_file(), env.paths.web_app_opened_file()] {
         match fs::remove_file(&path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

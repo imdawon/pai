@@ -75,6 +75,35 @@ impl Commands {
         }
     }
 
+    /// Starts `program` without waiting for it, for handing a URL to the OS's browser opener.
+    /// Returns whether it started.
+    pub(crate) fn start(&self, program: &str, args: &[&str]) -> bool {
+        match self {
+            Commands::Record(_) => self.run(program, args).ok,
+            Commands::System => {
+                let mut cmd = std::process::Command::new(program);
+                cmd.args(args)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                    cmd.creation_flags(CREATE_NO_WINDOW);
+                }
+                match cmd.spawn() {
+                    Ok(mut child) => {
+                        // Reaped in the background, so a long-running proxy keeps no zombie.
+                        std::thread::spawn(move || child.wait());
+                        true
+                    }
+                    Err(_) => false,
+                }
+            }
+        }
+    }
+
     fn must(&self, program: &str, args: &[&str]) -> Result<()> {
         let ran = self.run(program, args);
         if ran.ok {

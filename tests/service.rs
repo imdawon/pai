@@ -138,7 +138,7 @@ fn install_stops_a_proxy_started_by_pai_token() {
 fn unpair_removes_the_service() {
     let relay = FakeRelay::start("QRST6789");
     let t = TestEnv::new();
-    app::pair(&t.env, "QRST6789", Some(&relay.url), Some("http://api.test"), None, None).unwrap();
+    app::pair(&t.env, "QRST6789", Some(&relay.url), Some("http://api.test"), None, None, None).unwrap();
     if service::file(&t.env).is_none() {
         return;
     }

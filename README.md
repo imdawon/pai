@@ -28,7 +28,7 @@ Or paste `skill/dawonai/SKILL.md` into your coding agent, and it does all of thi
 
 | Command | Does |
 |---|---|
-| `pai pair <code> [--relay URL] [--api URL] [--name NAME]` | Links this machine using the 8-character code from **Connect a device** in the web app. Makes an Ed25519 device key and keeps it in the OS keychain. |
+| `pai pair <code> [--relay URL] [--api URL] [--app URL] [--name NAME]` | Links this machine using the 8-character code from **Connect a device** in the web app. Makes an Ed25519 device key and keeps it in the OS keychain. |
 | `pai token` | What coding tools run. Makes sure there's a credential for today, starts the local proxy if it isn't running (or is from an older `pai`), and prints the local key and nothing else. |
 | `pai proxy` | Runs the local proxy in the foreground. It only answers on 127.0.0.1, only with the local key, and refuses requests from web pages. Once a day, at a random time, it collects tomorrow's credential. |
 | `pai status` | Paired or not, account, plan, device, credentials for today and tomorrow, pins, and whether the proxy is running. Never prints secrets. |
@@ -36,24 +36,28 @@ Or paste `skill/dawonai/SKILL.md` into your coding agent, and it does all of thi
 | `pai setup <claude-code\|codex\|opencode\|omp\|hermes> [--apply]` | Prints the tool's config and where the DawonAI skill goes. `--apply` writes both and backs up any file it changes to `<file>.pai-backup-<time>`. |
 | `pai service <install\|uninstall\|status>` | Runs the proxy whenever you're logged in, for tools that can't run `pai token` themselves. A LaunchAgent on macOS, a systemd user service on Linux. Not on Windows yet. |
 
-The relay and API default to `https://relay.privacyai.example` and `https://api.privacyai.example`. Override them at pairing with the flags or `PAI_RELAY_URL` / `PAI_API_URL`.
+The relay and API default to `https://relay.privacyai.example` and `https://api.privacyai.example`. Override them at pairing with the flags or `PAI_RELAY_URL` / `PAI_API_URL`. The DawonAI web app's address is `app.<domain>` for a relay at `relay.<domain>`, and `https://app.privacyai.example` for any other relay; `--app` or `PAI_APP_URL` sets it.
 
 | Variable | Does |
 |---|---|
 | `PAI_PROXY_PORT` | The proxy's port, `47821` by default. Run `pai setup` again after changing it. |
 | `PAI_PREFETCH=0` | Stops the proxy collecting tomorrow's credential ahead. |
+| `PAI_OPEN_BROWSER=0` | Stops `pai` opening the DawonAI web app when this computer's device link is removed. |
 
 Each release carries the pins for the model API's key, plus a spare for when the box's key changes. Building or testing `pai` against a staging service, with a staging build, is covered in `docs/TESTING.md`.
 
 Errors go to stderr. `pai token` exits with 2 when not paired, 3 when the plan isn't paid, 4 when the device was removed, and 5 when the relay is unreachable.
+
+**When this computer's device link is removed.** DawonAI removes a `pai` device after 30 days without fetching a credential, and you can remove one in Account in the web app. The next time `pai token`, the proxy or `pai status` asks the relay, `pai` says so on stderr and opens the DawonAI web app in your default browser, at most once a UTC day. Pair again from **Account > Set up a coding tool**, after `pai unpair`.
 
 ## What's stored where
 
 | What | Where |
 |---|---|
 | Device key, today's and tomorrow's credentials, the local proxy key | OS keychain, service `dawonai`: macOS Keychain, Windows Credential Manager, or the Secret Service on Linux |
-| Relay URL, API URL, device ID, account ID | `pai/config.json` in the OS config directory (`~/Library/Application Support`, `%APPDATA%`, `~/.config`) |
+| Relay URL, API URL, web app URL, device ID, account ID | `pai/config.json` in the OS config directory (`~/Library/Application Support`, `%APPDATA%`, `~/.config`) |
 | Lock that stops parallel `pai token` calls fetching twice | `pai/token.lock` next to the config |
+| The UTC day `pai` last opened the web app for a removed device | `pai/web-app-opened` next to the config |
 
 On a headless Linux machine without a Secret Service, `pai` stops with an error. Set `PAI_KEYSTORE=file` to keep the secrets in `~/.config/pai/secrets.json` instead, with mode 0600 and no encryption. `PAI_CONFIG_DIR` moves all of these files to one directory.
 

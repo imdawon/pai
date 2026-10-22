@@ -19,6 +19,7 @@ fn refuses_a_pairing_made_in_test_mode_until_unpaired() {
     Config {
         relay_url: "http://127.0.0.1:9".into(),
         api_url: "https://api.attacker.example".into(),
+        app_url: None,
         device_id: "dev_1".into(),
         account_id: ACCOUNT_ID.into(),
         test: Some(TestMode { ca: ca.clone(), api_pins: vec!["AAAA".into()] }),
@@ -30,7 +31,7 @@ fn refuses_a_pairing_made_in_test_mode_until_unpaired() {
         t.env.config().unwrap_err(),
         app::token(&t.env).unwrap_err(),
         app::status(&t.env).err().unwrap(),
-        app::pair(&t.env, CODE, None, None, None, None).unwrap_err(),
+        app::pair(&t.env, CODE, None, None, None, None, None).unwrap_err(),
     ] {
         let msg = err.to_string();
         assert!(msg.contains("staging build") && msg.contains("`pai unpair`"), "{msg}");
@@ -48,11 +49,11 @@ fn has_no_test_mode() {
     let ca = t.dir.path().join("ca.pem");
     std::fs::write(&ca, "x").unwrap();
     let pins = ["AAAA".to_string()];
-    let err = app::pair(&t.env, CODE, Some(&relay.url), None, None, Some((ca.as_path(), &pins[..]))).unwrap_err();
+    let err = app::pair(&t.env, CODE, Some(&relay.url), None, None, None, Some((ca.as_path(), &pins[..]))).unwrap_err();
     assert!(err.to_string().contains("no test mode"), "{err}");
     assert!(t.env.config().unwrap().is_none());
 
-    app::pair(&t.env, CODE, Some(&relay.url), Some("http://api.test"), None, None).unwrap();
+    app::pair(&t.env, CODE, Some(&relay.url), Some("http://api.test"), None, None, None).unwrap();
     let cfg = t.env.config().unwrap().unwrap();
     let normal = app::trust(&t.env, Some(&cfg));
     t.env.vars.insert("PAI_TEST_CA".into(), ca.display().to_string());

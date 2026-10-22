@@ -112,7 +112,7 @@ fn against_real_relay() {
         .unwrap()
         .to_string();
     let spaced = format!("{}-{}", &code[..4], &code[4..]).to_lowercase();
-    app::pair(&t.env, &spaced, Some(&relay), None, None, None).unwrap();
+    app::pair(&t.env, &spaced, Some(&relay), None, None, None, None).unwrap();
 
     let err = app::credential(&t.env, false).unwrap_err();
     assert!(matches!(err, Error::NotPaid { .. }), "{err:?}");
@@ -166,7 +166,7 @@ fn against_real_relay() {
         .as_str()
         .unwrap()
         .to_string();
-    app::pair(&t.env, &code, Some(&relay), None, None, None).unwrap();
+    app::pair(&t.env, &code, Some(&relay), None, None, None, None).unwrap();
     app::credential(&t.env, false).unwrap();
     let notes = app::unpair(&t.env).unwrap();
     assert!(notes[0].contains("Removed this device"), "{notes:?}");

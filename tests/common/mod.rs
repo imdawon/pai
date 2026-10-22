@@ -315,6 +315,7 @@ impl TestEnv {
         pai::config::Config {
             relay_url: "http://127.0.0.1:9".into(),
             api_url: "http://api.test".into(),
+            app_url: None,
             device_id: "dev_1".into(),
             account_id: ACCOUNT_ID.into(),
             test: None,

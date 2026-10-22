@@ -123,7 +123,7 @@ fn start(api_port: u16, ca_pem: &str, pin: &str) -> (Running, FakeRelay) {
     let ca = t.dir.path().join("ca.pem");
     std::fs::write(&ca, ca_pem).unwrap();
     let pins = [pin.to_string()];
-    app::pair(&t.env, CODE, Some(&relay.url), Some(&api), None, Some((ca.as_path(), &pins[..]))).unwrap();
+    app::pair(&t.env, CODE, Some(&relay.url), Some(&api), None, None, Some((ca.as_path(), &pins[..]))).unwrap();
     let port = free_port();
     t.env.vars.insert("PAI_PROXY_PORT".into(), port.to_string());
     let key = app::local_key(&t.env).unwrap();
@@ -200,7 +200,7 @@ fn replaces_a_rejected_credential_once() {
 fn test_mode_is_on_only_when_paired_with_it_and_says_so() {
     let relay = FakeRelay::start(CODE);
     let t = TestEnv::new();
-    app::pair(&t.env, CODE, Some(&relay.url), None, None, None).unwrap();
+    app::pair(&t.env, CODE, Some(&relay.url), None, None, None, None).unwrap();
     let cfg = t.env.config().unwrap().unwrap();
     let normal = app::trust(&t.env, Some(&cfg));
     assert!(!normal.is_test());
@@ -225,6 +225,6 @@ fn test_mode_needs_pins() {
     let t = TestEnv::new();
     let ca = t.dir.path().join("ca.pem");
     std::fs::write(&ca, "x").unwrap();
-    let err = app::pair(&t.env, CODE, Some(&relay.url), None, None, Some((ca.as_path(), &[]))).unwrap_err();
+    let err = app::pair(&t.env, CODE, Some(&relay.url), None, None, None, Some((ca.as_path(), &[]))).unwrap_err();
     assert!(err.to_string().contains("pins"), "{err}");
 }

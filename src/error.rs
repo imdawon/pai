@@ -71,7 +71,9 @@ impl fmt::Display for Error {
             Error::Banned => write!(f, "this account is suspended and can't get new credentials"),
             Error::DeviceRemoved => write!(
                 f,
-                "device removed, pair again: this machine's device link was removed or expired. Run `pai unpair`, then `pai pair <code>` with a new code"
+                "device removed, pair again: this computer's DawonAI device link was removed, because it went unused for 30 days \
+                 or because it was removed in Account in the DawonAI web app. Run `pai unpair`, then pair again from \
+                 Account > Set up a coding tool in the DawonAI web app"
             ),
             Error::IssuanceLimit { retry_after } => {
                 write!(
