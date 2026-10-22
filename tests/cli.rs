@@ -50,6 +50,16 @@ fn binary_end_to_end() {
 
     let help = text(&cli.run(&["pair", "--help"]).stdout);
     assert!(help.contains("--relay") && !help.contains("test"), "test mode stays out of --help: {help}");
+    let version = text(&cli.run(&["--version"]).stdout);
+    #[cfg(not(feature = "test-mode"))]
+    {
+        assert!(!version.contains("staging"), "{version}");
+        let out = cli.run(&["pair", "wxyz-6789", "--test-ca", "ca.pem", "--test-pin", "AAAA"]);
+        assert_eq!(out.status.code(), Some(2));
+        assert!(text(&out.stderr).contains("unexpected argument '--test-ca'"), "{}", text(&out.stderr));
+    }
+    #[cfg(feature = "test-mode")]
+    assert!(version.contains("staging build"), "{version}");
 
     let out = cli.run(&["token"]);
     assert_eq!(out.status.code(), Some(2));

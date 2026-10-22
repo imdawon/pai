@@ -8,8 +8,13 @@ use pai::service;
 use pai::setup::{self, Tool};
 
 /// Connects coding tools to DawonAI through a local proxy, so they never hold a credential.
+#[cfg(not(feature = "test-mode"))]
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+#[cfg(feature = "test-mode")]
+const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (staging build, with test mode)");
+
 #[derive(Parser)]
-#[command(name = "pai", version)]
+#[command(name = "pai", version = VERSION)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -30,9 +35,11 @@ enum Command {
         /// Name shown in the web app's device list [default: pai on <hostname>]
         #[arg(long)]
         name: Option<String>,
-        // Test mode, for staging only (docs/TESTING.md). Hidden from --help on purpose.
+        // Test mode, in staging builds only (docs/TESTING.md). Hidden from --help on purpose.
+        #[cfg(feature = "test-mode")]
         #[arg(long = "test-ca", hide = true, requires = "test_pins")]
         test_ca: Option<std::path::PathBuf>,
+        #[cfg(feature = "test-mode")]
         #[arg(long = "test-pin", hide = true, requires = "test_ca")]
         test_pins: Vec<String>,
     },
@@ -93,16 +100,22 @@ fn run(command: Command) -> Result<(), Error> {
             relay,
             api,
             name,
+            #[cfg(feature = "test-mode")]
             test_ca,
+            #[cfg(feature = "test-mode")]
             test_pins,
         } => {
+            #[cfg(feature = "test-mode")]
+            let test = test_ca.as_deref().map(|ca| (ca, test_pins.as_slice()));
+            #[cfg(not(feature = "test-mode"))]
+            let test = None;
             let cfg = app::pair(
                 &env,
                 &code,
                 relay.as_deref(),
                 api.as_deref(),
                 name.as_deref(),
-                test_ca.as_deref().map(|ca| (ca, test_pins.as_slice())),
+                test,
             )?;
             println!(
                 "Paired. Account {}, device {}.",

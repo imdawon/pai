@@ -43,7 +43,7 @@ The relay and API default to `https://relay.privacyai.example` and `https://api.
 | `PAI_PROXY_PORT` | The proxy's port, `47821` by default. Run `pai setup` again after changing it. |
 | `PAI_PREFETCH=0` | Stops the proxy collecting tomorrow's credential ahead. |
 
-Each release carries the pins for the model API's key, plus a spare for when the box's key changes. Building or testing `pai` against a staging service is covered in `docs/TESTING.md`.
+Each release carries the pins for the model API's key, plus a spare for when the box's key changes. Building or testing `pai` against a staging service, with a staging build, is covered in `docs/TESTING.md`.
 
 Errors go to stderr. `pai token` exits with 2 when not paired, 3 when the plan isn't paid, 4 when the device was removed, and 5 when the relay is unreachable.
 
@@ -84,6 +84,7 @@ Run `pai setup <tool>` to see the exact config, with the path to `pai`, the prox
 ```sh
 cargo build --release
 cargo test
+cargo test --features test-mode
 ```
 
 `pai-proto` comes from `../pai-relay/crates/pai-proto`, so check out `pai-relay` next to this repo.

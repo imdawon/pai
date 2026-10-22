@@ -26,6 +26,9 @@ mkdir -p "$out"
 : "${PAI_RELEASE_API_PINS:?set PAI_RELEASE_API_PINS to the model API key pins (current,spare)}"
 export PAI_RELEASE_API_PINS
 
+# Every cargo build below leaves out the `test-mode` feature, so release binaries have no test mode
+# (docs/TESTING.md). Never add --features here.
+
 # pai-proto is a path dependency on ../pai-relay, so the containers need both checkouts.
 relay="$(cd "$root/../pai-relay" && pwd)"
 

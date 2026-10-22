@@ -7,6 +7,7 @@ use std::sync::Arc;
 use base64::Engine;
 use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+#[cfg(feature = "test-mode")]
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
@@ -74,6 +75,9 @@ impl ServerCertVerifier for PinnedVerifier {
 fn roots(test_ca: Option<&std::path::Path>) -> Result<rustls::RootCertStore> {
     let mut roots = rustls::RootCertStore::empty();
     match test_ca {
+        #[cfg(not(feature = "test-mode"))]
+        Some(_) => return Err(Error::Setup("this pai is a release build, which has no test mode".into())),
+        #[cfg(feature = "test-mode")]
         Some(path) => {
             let bad = |what: String| Error::Setup(format!("the test CA {} {what}", path.display()));
             for cert in CertificateDer::pem_file_iter(path).map_err(|e| bad(format!("couldn't be read: {e}")))? {

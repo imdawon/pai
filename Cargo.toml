@@ -26,6 +26,11 @@ rand = "0.8"
 gethostname = "1"
 zeroize = "1"
 
+[features]
+# Test mode, for staging builds only (docs/TESTING.md). Release builds leave it off, so they have
+# no way to trust a CA or pins other than their own.
+test-mode = []
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

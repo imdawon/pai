@@ -88,8 +88,20 @@ impl Env {
             .filter(|s| !s.is_empty())
     }
 
+    /// The pairing. A release build refuses one made in test mode by a staging build, rather than
+    /// quietly running it with the release's trust: the user has to know to pair again.
     pub fn config(&self) -> Result<Option<Config>> {
-        Config::load(&self.paths.config_file())
+        let config = Config::load(&self.paths.config_file())?;
+        #[cfg(not(feature = "test-mode"))]
+        if config.as_ref().is_some_and(|c| c.test.is_some()) {
+            return Err(Error::Setup(format!(
+                "{} was made in test mode by a staging build of pai. This pai is a release build, which trusts \
+                 only the public certificate authorities and the model API pins built into it. Run `pai unpair`, \
+                 then pair again from Account > Set up a coding tool in the DawonAI web app",
+                self.paths.config_file().display()
+            )));
+        }
+        Ok(config)
     }
 
     pub fn default_api_url(&self) -> String {
@@ -172,8 +184,11 @@ pub fn pair(
     let api_url = api_url
         .map(trim_url)
         .unwrap_or_else(|| env.default_api_url());
-    let test = match test {
+    let test: Option<TestMode> = match test {
         None => None,
+        #[cfg(not(feature = "test-mode"))]
+        Some(_) => return Err(Error::Setup("this pai is a release build, which has no test mode".into())),
+        #[cfg(feature = "test-mode")]
         Some((ca, pins)) => {
             if pins.is_empty() {
                 return Err(Error::Setup("test mode needs the API's pins as well as the test CA".into()));
@@ -259,9 +274,10 @@ pub fn credential(env: &Env, refresh: bool) -> Result<String> {
     current_credential(env, &config, today, refresh)
 }
 
-/// Which certificates `pai` trusts. Normally the public certificate authorities and the pins this
-/// release was built with. Test mode (docs/TESTING.md) swaps in a test CA and test pins, from the
-/// pairing or from `PAI_TEST_CA` and `PAI_TEST_API_PINS`; it never turns pin checking off.
+/// Which certificates `pai` trusts: the public certificate authorities and the pins this release
+/// was built with. A staging build (the `test-mode` feature, docs/TESTING.md) can swap in a test
+/// CA and test pins, from the pairing or from `PAI_TEST_CA` and `PAI_TEST_API_PINS`; it never
+/// turns pin checking off. In a release build `test_ca` is always `None`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Trust {
     pub test_ca: Option<PathBuf>,
@@ -274,16 +290,33 @@ impl Trust {
     }
 }
 
+fn pin_list(s: &str) -> Vec<String> {
+    s.split(',').map(str::trim).filter(|p| !p.is_empty()).map(str::to_string).collect()
+}
+
+fn release_pins() -> Vec<String> {
+    pin_list(option_env!("PAI_RELEASE_API_PINS").unwrap_or(""))
+}
+
+#[cfg_attr(not(feature = "test-mode"), allow(unused_variables))]
 pub fn trust(env: &Env, config: Option<&Config>) -> Trust {
-    let list = |s: &str| s.split(',').map(str::trim).filter(|p| !p.is_empty()).map(str::to_string).collect::<Vec<_>>();
+    #[cfg(feature = "test-mode")]
+    if let Some(t) = test_trust(env, config) {
+        return t;
+    }
+    Trust { test_ca: None, api_pins: release_pins() }
+}
+
+#[cfg(feature = "test-mode")]
+fn test_trust(env: &Env, config: Option<&Config>) -> Option<Trust> {
     let test = config.and_then(|c| c.test.as_ref());
-    let test_ca = env.var("PAI_TEST_CA").map(PathBuf::from).or_else(|| test.map(|t| t.ca.clone()));
+    let test_ca = env.var("PAI_TEST_CA").map(PathBuf::from).or_else(|| test.map(|t| t.ca.clone()))?;
     let api_pins = match (env.var("PAI_TEST_API_PINS"), test) {
-        (Some(v), _) if test_ca.is_some() => list(v),
-        (_, Some(t)) if test_ca.is_some() => t.api_pins.clone(),
-        _ => list(option_env!("PAI_RELEASE_API_PINS").unwrap_or("")),
+        (Some(v), _) => pin_list(v),
+        (None, Some(t)) => t.api_pins.clone(),
+        (None, None) => release_pins(),
     };
-    Trust { test_ca, api_pins }
+    Some(Trust { test_ca: Some(test_ca), api_pins })
 }
 
 /// Printed on stderr by every command while test mode is on.
@@ -620,7 +653,9 @@ impl std::fmt::Display for Status {
 /// Returns lines to show the user.
 pub fn unpair(env: &Env) -> Result<Vec<String>> {
     let mut notes = Vec::new();
-    let config = env.config()?;
+    // Not env.config(), which a release build refuses for a test-mode pairing: unpairing is how
+    // the user gets rid of one. The relay call below still uses this build's trust.
+    let config = Config::load(&env.paths.config_file())?;
     let key = match env.device_key() {
         Ok(k) => Some(k),
         Err(Error::NotPaired) => None,

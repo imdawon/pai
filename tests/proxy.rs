@@ -1,3 +1,7 @@
+// Every test here talks to a fake model API over TLS with its own CA, which only a staging
+// build can trust: run them with `cargo test --features test-mode`.
+#![cfg(feature = "test-mode")]
+
 mod common;
 
 use std::convert::Infallible;
