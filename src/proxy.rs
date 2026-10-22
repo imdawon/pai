@@ -39,6 +39,10 @@ pub fn fingerprint(config: &Config, pins: &[String]) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(env!("CARGO_PKG_VERSION"));
+    // A rebuilt or reinstalled binary replaces a proxy started by the old one.
+    if let Some(t) = std::env::current_exe().ok().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok()) {
+        h.update(format!("{t:?}"));
+    }
     for part in [&config.api_url, &config.device_id, &config.relay_url] {
         h.update([0]);
         h.update(part);
@@ -291,8 +295,10 @@ fn respond(status: StatusCode, headers: &HeaderMap, body: Body) -> Response {
 
 fn unreachable(api: &str, e: &reqwest::Error) -> Response {
     let mut source: Option<&dyn std::error::Error> = Some(e);
+    let mut innermost = e.to_string();
     while let Some(s) = source {
-        if s.to_string().contains(pin::PIN_MISMATCH) {
+        innermost = s.to_string();
+        if innermost.contains(pin::PIN_MISMATCH) {
             return error(
                 StatusCode::BAD_GATEWAY,
                 "api_error",
@@ -305,5 +311,9 @@ fn unreachable(api: &str, e: &reqwest::Error) -> Response {
         }
         source = s.source();
     }
-    error(StatusCode::BAD_GATEWAY, "api_error", format!("pai couldn't reach the model API at {api}. Check your connection and try again."))
+    error(
+        StatusCode::BAD_GATEWAY,
+        "api_error",
+        format!("pai couldn't reach the model API at {api} ({innermost}). Check your connection and try again."),
+    )
 }
