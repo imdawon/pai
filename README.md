@@ -27,7 +27,7 @@ Or paste `skill/privacy-ai/SKILL.md` into your coding agent, and it does all of 
 | Command | Does |
 |---|---|
 | `pai pair <code> [--relay URL] [--api URL] [--name NAME]` | Links this machine using the 8-character code from **Connect a device** in the web app. Makes an Ed25519 device key and keeps it in the OS keychain. |
-| `pai token [--refresh]` | Prints today's credential and nothing else. Reuses the cached one; otherwise collects a new blind-signed one from the relay. |
+| `pai token [--refresh]` | Prints today's credential and nothing else. Reuses the cached one, or the one collected yesterday; otherwise collects a new blind-signed one from the relay. Then it starts a background `pai prefetch`, once a day, that waits a random time and collects tomorrow's. |
 | `pai status` | Paired or not, account, plan, device, and whether there's a credential for today. Never prints secrets. |
 | `pai unpair` | Removes the device from your account, then deletes its key, credential and config here, even if the relay can't be reached. |
 | `pai setup <claude-code\|codex\|opencode\|omp> [--apply]` | Prints the tool's config. `--apply` writes it and backs up any file it changes to `<file>.pai-backup-<time>`. |
@@ -43,8 +43,11 @@ Errors go to stderr. `pai token` exits with 2 when not paired, 3 when the plan i
 | Device key, today's credential | OS keychain, service `privacy-ai`: macOS Keychain, Windows Credential Manager, or the Secret Service on Linux |
 | Relay URL, API URL, device ID, account ID | `pai/config.json` in the OS config directory (`~/Library/Application Support`, `%APPDATA%`, `~/.config`) |
 | Lock that stops parallel `pai token` calls fetching twice | `pai/token.lock` next to the config |
+| The day a background fetch last started | `pai/prefetch-day` next to the config |
 
 On a headless Linux machine without a Secret Service, `pai` stops with an error. Set `PAI_KEYSTORE=file` to keep the secrets in `~/.config/pai/secrets.json` instead, with mode 0600 and no encryption. `PAI_CONFIG_DIR` moves all of these files to one directory.
+
+**Why tomorrow's credential is collected ahead.** Collecting a credential is signed with this device's key, so the relay knows which account asked. If `pai` collected it just before your tool used it, someone watching the relay could match the two by time and tie that day's requests to your account. Collecting it at a random time the day before breaks that link. Set `PAI_PREFETCH=0` to turn this off.
 
 ## Coding tools
 

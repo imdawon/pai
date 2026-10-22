@@ -12,7 +12,7 @@ use zeroize::Zeroizing;
 
 use crate::config::{Config, DEFAULT_API_URL, DEFAULT_RELAY_URL, Paths, trim_url};
 use crate::error::{Error, Result, io_err};
-use crate::keystore::{CREDENTIAL, DEVICE_KEY, Keystore};
+use crate::keystore::{CREDENTIAL, DEVICE_KEY, Keystore, NEXT_CREDENTIAL};
 use crate::relay::Relay;
 
 #[derive(Debug, Clone, Copy)]
@@ -41,6 +41,8 @@ pub struct Env {
     pub pai_bin: PathBuf,
     /// Environment variables, captured once.
     pub vars: HashMap<String, String>,
+    /// Whether `pai token` may start a background `pai prefetch`. `PAI_PREFETCH=0` turns it off.
+    pub prefetch: bool,
 }
 
 impl Env {
@@ -61,6 +63,7 @@ impl Env {
             }
         };
         let pai_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("pai"));
+        let prefetch = vars.get("PAI_PREFETCH").map(|v| v.trim()) != Some("0");
         Ok(Env {
             paths,
             keystore,
@@ -68,6 +71,7 @@ impl Env {
             relay_timeout: Duration::from_secs(30),
             pai_bin,
             vars,
+            prefetch,
         })
     }
 
@@ -196,7 +200,11 @@ pub fn pair(
 }
 
 fn cached_credential(env: &Env, day: u32) -> Result<Option<String>> {
-    let Some(stored) = env.keystore.get(CREDENTIAL)? else {
+    stored_credential(env, CREDENTIAL, day)
+}
+
+fn stored_credential(env: &Env, name: &str, day: u32) -> Result<Option<String>> {
+    let Some(stored) = env.keystore.get(name)? else {
         return Ok(None);
     };
     match pai_proto::Credential::decode(&stored) {
@@ -221,20 +229,41 @@ fn lock(env: &Env) -> Result<fs::File> {
     Ok(file)
 }
 
-/// Returns today's credential, fetching a fresh one only when the cache is not for today
-/// (or `refresh` is set).
+/// Returns today's credential. It comes from the cache, or from the one collected yesterday in
+/// the background; only when neither is there (or `refresh` is set) is one fetched now. Then it
+/// makes sure tomorrow's will be collected at a random time today.
 pub fn token(env: &Env, refresh: bool) -> Result<String> {
     let config = env.paired()?;
     let today = day_number(env.clock.now());
+    let credential = current_credential(env, &config, today, refresh)?;
+    if env.prefetch {
+        let _ = start_prefetch(env, today);
+    }
+    Ok(credential)
+}
+
+fn current_credential(env: &Env, config: &Config, today: u32, refresh: bool) -> Result<String> {
     if !refresh && let Some(c) = cached_credential(env, today)? {
         return Ok(c);
     }
-
     let _lock = lock(env)?;
-    if !refresh && let Some(c) = cached_credential(env, today)? {
-        return Ok(c);
+    if !refresh {
+        if let Some(c) = cached_credential(env, today)? {
+            return Ok(c);
+        }
+        if let Some(c) = stored_credential(env, NEXT_CREDENTIAL, today)? {
+            env.keystore.set(CREDENTIAL, &c)?;
+            env.keystore.delete(NEXT_CREDENTIAL)?;
+            return Ok(c);
+        }
     }
+    let encoded = fetch_credential(env, config, today)?;
+    env.keystore.set(CREDENTIAL, &encoded)?;
+    Ok(encoded)
+}
 
+/// Asks the relay for a blind-signed credential for `day`, which is today or tomorrow.
+fn fetch_credential(env: &Env, config: &Config, day: u32) -> Result<String> {
     let key = env.device_key()?;
     let relay = Relay::new(&config.relay_url, env.relay_timeout);
     let account = relay.account(&key, &config.device_id)?;
@@ -249,21 +278,21 @@ pub fn token(env: &Env, refresh: bool) -> Result<String> {
     let info = keys
         .keys
         .iter()
-        .find(|k| k.plan == plan && k.day == today)
+        .find(|k| k.plan == plan && k.day == day)
         .ok_or_else(|| {
             Error::BadIssuerResponse(format!(
-                "it has no {} key for UTC day {today}; check that this computer's date is right",
+                "it has no {} key for UTC day {day}; check that this computer's date is right",
                 plan.as_str()
             ))
         })?;
     let issuer = pai_proto::issuer_public_key_from_spki(&info.spki)
         .map_err(|e| Error::BadIssuerResponse(format!("unreadable issuer key: {e}")))?;
 
-    let pending = PendingCredential::new(&issuer, plan, today)
+    let pending = PendingCredential::new(&issuer, plan, day)
         .map_err(|e| Error::BadIssuerResponse(e.to_string()))?;
     let request = CredentialRequest {
         plan,
-        day: today,
+        day,
         blind_message: b64(pending.blind_message()),
     };
     let response = relay.credentials(&key, &config.device_id, &request)?;
@@ -275,16 +304,86 @@ pub fn token(env: &Env, refresh: bool) -> Result<String> {
     credential
         .verify(&issuer)
         .map_err(|_| Error::BadIssuerResponse("the signature doesn't verify".into()))?;
+    Ok(credential.encode())
+}
 
-    let encoded = credential.encode();
-    env.keystore.set(CREDENTIAL, &encoded)?;
-    Ok(encoded)
+/// Leave this much of the day unused, so a late fetch still lands before midnight.
+const PREFETCH_MARGIN_SECS: i64 = 15 * 60;
+
+/// Starts `pai prefetch` in the background, once a day, unless tomorrow's credential is already
+/// here. It runs detached, so the coding tool that ran `pai token` doesn't wait for it.
+fn start_prefetch(env: &Env, today: u32) -> Result<()> {
+    if stored_credential(env, NEXT_CREDENTIAL, today + 1)?.is_some() {
+        return Ok(());
+    }
+    let marker = env.paths.prefetch_file();
+    if fs::read_to_string(&marker).ok().and_then(|s| s.trim().parse::<u32>().ok()) == Some(today) {
+        return Ok(());
+    }
+    fs::create_dir_all(&env.paths.config_dir).map_err(|e| io_err("create", &env.paths.config_dir, e))?;
+    fs::write(&marker, today.to_string()).map_err(|e| io_err("write", &marker, e))?;
+
+    let mut cmd = std::process::Command::new(&env.pai_bin);
+    cmd.args(["prefetch", "--day", &(today + 1).to_string()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Its own process group, so closing the coding tool doesn't take it down too.
+        cmd.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+    cmd.spawn().map_err(|e| Error::Io(format!("couldn't start the background fetch: {e}")))?;
+    Ok(())
+}
+
+/// A uniformly random wait between now and shortly before the end of the UTC day, or `None`
+/// when the day is nearly over.
+pub fn prefetch_delay(now: i64) -> Option<Duration> {
+    let left = DAY_SECS - now.rem_euclid(DAY_SECS) - PREFETCH_MARGIN_SECS;
+    if left <= 0 {
+        return None;
+    }
+    Some(Duration::from_secs(rand::Rng::gen_range(&mut rand::rngs::OsRng, 0..left as u64)))
+}
+
+const DAY_SECS: i64 = 86_400;
+
+/// Collects the credential for `day` (tomorrow) and keeps it for `pai token` to use then. Run in
+/// the background by `pai token` after `delay`, so the time it's fetched, which the relay sees,
+/// says nothing about when it's used.
+pub fn prefetch(env: &Env, day: u32, delay: Duration) -> Result<bool> {
+    if day_number(env.clock.now()) + 1 != day {
+        return Ok(false);
+    }
+    std::thread::sleep(delay);
+    // The computer may have slept through the end of the day.
+    if day_number(env.clock.now()) + 1 != day {
+        return Ok(false);
+    }
+    let config = env.paired()?;
+    let _lock = lock(env)?;
+    if stored_credential(env, NEXT_CREDENTIAL, day)?.is_some() {
+        return Ok(false);
+    }
+    let encoded = fetch_credential(env, &config, day)?;
+    env.keystore.set(NEXT_CREDENTIAL, &encoded)?;
+    Ok(true)
 }
 
 pub struct Status {
     pub config: Option<Config>,
     pub plan: String,
     pub credential_today: bool,
+    pub credential_tomorrow: bool,
     pub keystore: String,
 }
 
@@ -296,11 +395,14 @@ pub fn status(env: &Env) -> Result<Status> {
             config,
             plan: "-".into(),
             credential_today: false,
+            credential_tomorrow: false,
             keystore,
         });
     };
     let today = day_number(env.clock.now());
-    let credential_today = cached_credential(env, today).ok().flatten().is_some();
+    let credential_today = cached_credential(env, today).ok().flatten().is_some()
+        || stored_credential(env, NEXT_CREDENTIAL, today).ok().flatten().is_some();
+    let credential_tomorrow = stored_credential(env, NEXT_CREDENTIAL, today + 1).ok().flatten().is_some();
     let plan = match env.device_key() {
         Err(e) => format!("unknown ({e})"),
         Ok(key) => match Relay::new(
@@ -323,6 +425,7 @@ pub fn status(env: &Env) -> Result<Status> {
         config,
         plan,
         credential_today,
+        credential_tomorrow,
         keystore,
     })
 }
@@ -340,10 +443,11 @@ impl std::fmt::Display for Status {
         writeln!(
             f,
             "Credential: {}",
-            if self.credential_today {
-                "yes, for today"
-            } else {
-                "none for today"
+            match (self.credential_today, self.credential_tomorrow) {
+                (true, true) => "yes, for today and tomorrow",
+                (true, false) => "yes, for today",
+                (false, true) => "none for today; tomorrow's is ready",
+                (false, false) => "none for today",
             }
         )?;
         writeln!(f, "Relay:      {}", c.relay_url)?;
@@ -383,7 +487,8 @@ pub fn unpair(env: &Env) -> Result<Vec<String>> {
     }
     env.keystore.delete(DEVICE_KEY)?;
     env.keystore.delete(CREDENTIAL)?;
-    for path in [env.paths.config_file(), env.paths.lock_file()] {
+    env.keystore.delete(NEXT_CREDENTIAL)?;
+    for path in [env.paths.config_file(), env.paths.lock_file(), env.paths.prefetch_file()] {
         match fs::remove_file(&path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

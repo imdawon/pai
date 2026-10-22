@@ -17,6 +17,7 @@ impl Cli {
             .env("HOME", self.dir.path().join("home"))
             .env("PAI_CONFIG_DIR", self.dir.path().join("config"))
             .env("PAI_KEYSTORE", "file")
+            .env("PAI_PREFETCH", "0")
             .output()
             .unwrap()
     }

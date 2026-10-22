@@ -65,6 +65,11 @@ impl Paths {
         self.config_dir.join("token.lock")
     }
 
+    /// The UTC day for which a background fetch of the next day's credential was last started.
+    pub fn prefetch_file(&self) -> PathBuf {
+        self.config_dir.join("prefetch-day")
+    }
+
     pub fn from_env() -> Result<Paths> {
         let home = dirs::home_dir()
             .ok_or_else(|| Error::Io("couldn't find your home directory".into()))?;

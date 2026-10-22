@@ -297,6 +297,7 @@ impl TestEnv {
             relay_timeout: Duration::from_secs(10),
             pai_bin: PathBuf::from("/opt/pai/bin/pai"),
             vars: HashMap::new(),
+            prefetch: false,
         };
         TestEnv { dir, env }
     }

@@ -38,6 +38,13 @@ enum Command {
     },
     /// Show whether this machine is paired, and the plan. Never prints secrets.
     Status,
+    /// Collect tomorrow's credential after a random wait. `pai token` starts this in the background.
+    #[command(hide = true)]
+    Prefetch {
+        /// The UTC day to collect for: tomorrow
+        #[arg(long)]
+        day: u32,
+    },
     /// Remove this device from the account and delete its key and config
     Unpair,
     /// Print the config a coding tool needs, or write it with --apply
@@ -91,6 +98,11 @@ fn run(command: Command) -> Result<(), Error> {
                 .map_err(|e| Error::Io(format!("couldn't write the credential: {e}")))?;
         }
         Command::Status => print!("{}", app::status(&env)?),
+        Command::Prefetch { day } => {
+            if let Some(delay) = app::prefetch_delay(env.clock.now()) {
+                app::prefetch(&env, day, delay)?;
+            }
+        }
         Command::Unpair => {
             for line in app::unpair(&env)? {
                 println!("{line}");

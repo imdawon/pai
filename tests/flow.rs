@@ -255,3 +255,47 @@ fn normalizes_codes() {
     assert!(app::normalize_code("ABCD-EFGU").is_err());
     assert!(app::normalize_code("ABCD-EFG").is_err());
 }
+
+#[test]
+fn tomorrows_credential_is_collected_ahead_and_used_without_a_fetch() {
+    use pai::keystore::NEXT_CREDENTIAL;
+    let relay = FakeRelay::start(CODE);
+    let mut t = paired(&relay);
+
+    // Yesterday, the background fetch collects the credential for today.
+    t.env.clock = Clock::Fixed(now_unix() - 86_400);
+    assert!(!app::prefetch(&t.env, today() + 1, std::time::Duration::ZERO).unwrap(), "only for tomorrow");
+    assert!(app::prefetch(&t.env, today(), std::time::Duration::ZERO).unwrap());
+    assert!(!app::prefetch(&t.env, today(), std::time::Duration::ZERO).unwrap(), "already collected");
+    assert_eq!(relay.issued(), 1);
+
+    // Today, `pai token` uses it and asks the relay for nothing.
+    t.env.clock = Clock::System;
+    let requests_before = relay.state.lock().unwrap().requests.len();
+    let token = app::token(&t.env, false).unwrap();
+    assert_eq!(Credential::decode(&token).unwrap().day, today());
+    assert_eq!(relay.state.lock().unwrap().requests.len(), requests_before);
+    assert_eq!(t.env.keystore.get(CREDENTIAL).unwrap().as_deref().map(String::as_str), Some(token.as_str()));
+    assert!(t.env.keystore.get(NEXT_CREDENTIAL).unwrap().is_none());
+}
+
+#[test]
+fn token_starts_the_background_fetch_once_a_day() {
+    let relay = FakeRelay::start(CODE);
+    let mut t = paired(&relay);
+    t.env.prefetch = true;
+    t.env.pai_bin = t.dir.path().join("no-such-pai");
+    app::token(&t.env, false).unwrap();
+    let marker = std::fs::read_to_string(t.env.paths.prefetch_file()).unwrap();
+    assert_eq!(marker.trim(), today().to_string());
+}
+
+#[test]
+fn prefetch_waits_a_random_time_within_the_day() {
+    let midnight = 20_000 * 86_400;
+    for _ in 0..200 {
+        let d = app::prefetch_delay(midnight + 3_600).unwrap().as_secs() as i64;
+        assert!((0..86_400 - 3_600 - 900).contains(&d), "{d}");
+    }
+    assert!(app::prefetch_delay(midnight + 86_400 - 600).is_none());
+}
