@@ -214,20 +214,30 @@ fn claude_settings(t: &Target) -> Value {
 /// These beat apiKeyHelper, so a leftover one silently sends the wrong key.
 const CLAUDE_OVERRIDING_VARS: [&str; 2] = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
 
-fn claude_warnings(env: &Env) -> String {
+fn claude_warnings(env: &Env, t: &Target) -> String {
+    let mut out = String::new();
     let set: Vec<&str> = CLAUDE_OVERRIDING_VARS
         .iter()
         .copied()
         .filter(|v| env.var(v).is_some())
         .collect();
-    if set.is_empty() {
-        String::new()
-    } else {
-        format!(
+    if !set.is_empty() {
+        out.push_str(&format!(
             "\nWarning: {} is set in your shell and takes precedence over apiKeyHelper. Unset it before starting Claude Code.\n",
             set.join(" and ")
-        )
+        ));
     }
+    // Claude Code ignores env.ANTHROPIC_BASE_URL from settings when its launch environment sets one.
+    if let Some(url) = env
+        .var("ANTHROPIC_BASE_URL")
+        .filter(|u| crate::config::trim_url(u) != t.api_url)
+    {
+        out.push_str(&format!(
+            "\nWarning: ANTHROPIC_BASE_URL={url} is set in the environment Claude Code starts in, and it wins over \
+             settings.json. Unset it, or start Claude Code from a shell without it.\n"
+        ));
+    }
+    out
 }
 
 fn claude_print(env: &Env, t: &Target) -> String {
@@ -236,7 +246,7 @@ fn claude_print(env: &Env, t: &Target) -> String {
          at startup, every hour, and after a 401.\n{}",
         claude_settings_path(env).display(),
         pretty(&claude_settings(t)),
-        claude_warnings(env)
+        claude_warnings(env, t)
     )
 }
 
@@ -284,7 +294,7 @@ fn claude_apply(env: &Env, t: &Target) -> Result<String> {
         &mut log,
     )?;
     log.push_str("Restart Claude Code to use Privacy AI.\n");
-    log.push_str(&claude_warnings(env));
+    log.push_str(&claude_warnings(env, t));
     Ok(log)
 }
 
