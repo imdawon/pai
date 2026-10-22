@@ -62,7 +62,17 @@ cargo build --release
 cargo test
 ```
 
-`pai-proto` comes from `../pai-relay/crates/pai-proto`, so check out `pai-relay` next to this repo. Release builds for Linux target `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`, which give a static binary. Release files are named `pai-<arch>-<target>`, for example `pai-aarch64-apple-darwin` or `pai-x86_64-pc-windows-msvc.exe`, next to a `SHA256SUMS` file.
+`pai-proto` comes from `../pai-relay/crates/pai-proto`, so check out `pai-relay` next to this repo.
+
+`release/build.sh` makes a release on a Mac with Docker running. It builds macOS natively, Linux as static musl binaries in `rust:1.95-alpine`, and Windows with `cargo-xwin` (static CRT, so no Visual C++ runtime needed). It writes to `dist/`, which is what gets hosted at `https://<domain>/pai/`:
+
+| Path | Holds |
+|---|---|
+| `dist/<version>/` | `pai-{aarch64,x86_64}-apple-darwin`, `pai-{aarch64,x86_64}-unknown-linux-musl`, `pai-{x86_64,aarch64}-pc-windows-msvc.exe`, `privacy-ai-skill.zip`, `opencode-privacy-ai.ts`, `omp-privacy-ai.ts` and `SHA256SUMS` |
+| `dist/latest/` | A copy of the newest version, which the installers download from |
+| `dist/index.html`, `install.sh`, `install.ps1` | The release page and the installers |
+
+`release/index.sh <version>` redoes only the page. The binaries aren't signed; `release/SIGNING.md` covers what signing takes and what users can do meanwhile.
 
 `cargo test` runs a fake relay with real issuer keys. To run against a real relay started with `PAI_DEV_PAYMENTS=1`:
 
