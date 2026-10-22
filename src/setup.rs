@@ -505,7 +505,6 @@ fn omp_apply(env: &Env, t: &Target) -> Result<String> {
 
 const HERMES_BEGIN: &str = "# privacy-ai (managed by pai setup hermes)";
 const HERMES_END: &str = "# end privacy-ai";
-const HERMES_KEY_PLACEHOLDER: &str = "<the output of `pai token`>";
 
 fn hermes_dir(env: &Env) -> PathBuf {
     if let Some(d) = env.var("HERMES_HOME") {
@@ -526,7 +525,13 @@ fn hermes_config_path(env: &Env) -> PathBuf {
     hermes_dir(env).join("config.yaml")
 }
 
-fn hermes_block(t: &Target, key: &str, indent: &str, step: &str, nl: &str) -> String {
+/// Hermes runs `key_cmd` for its key, as Claude Code runs apiKeyHelper, so no key is written into
+/// config.yaml and `pai token` starts the proxy along with Hermes.
+fn hermes_key_cmd(t: &Target) -> String {
+    format!("{} token", shell_word(&t.pai_bin))
+}
+
+fn hermes_block(t: &Target, indent: &str, step: &str, nl: &str) -> String {
     let i1 = format!("{indent}{step}");
     let i2 = format!("{i1}{step}");
     let i3 = format!("{i2}{step}");
@@ -535,8 +540,8 @@ fn hermes_block(t: &Target, key: &str, indent: &str, step: &str, nl: &str) -> St
         format!("{indent}{PROVIDER_ID}:"),
         format!("{i1}name: Privacy AI"),
         format!("{i1}api: {}", yaml_str(&format!("{}/v1", t.base_url))),
-        format!("{i1}api_key: {}", yaml_str(key)),
-        format!("{i1}transport: chat_completions"),
+        format!("{i1}key_cmd: {}", yaml_str(&hermes_key_cmd(t))),
+        format!("{i1}api_mode: chat_completions"),
         format!("{i1}default_model: {MODEL}"),
         format!("{i1}models:"),
         format!("{i2}{MODEL}:"),
@@ -577,7 +582,7 @@ fn entry_end(lines: &[&str], start: usize, indent: usize) -> usize {
 /// Puts our provider into a Hermes config.yaml by editing the text, so the user's comments and
 /// layout survive: a YAML library would drop them. Replaces our marked block, or an unmarked
 /// `privacy-ai` provider, or adds the block under `providers:`, creating that if needed.
-fn hermes_merge(text: &str, path: &Path, t: &Target, key: &str) -> Result<(String, &'static str)> {
+fn hermes_merge(text: &str, path: &Path, t: &Target) -> Result<(String, &'static str)> {
     let nl = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let lines: Vec<&str> = text.split_inclusive('\n').collect();
     let splice = |from: usize, to: usize, block: String| -> String {
@@ -600,7 +605,7 @@ fn hermes_merge(text: &str, path: &Path, t: &Target, key: &str) -> Result<(Strin
             },
         };
         let step = if indent.is_empty() { "  " } else { indent };
-        return Ok((splice(begin, end, hermes_block(t, key, indent, step, nl)), "Replaced"));
+        return Ok((splice(begin, end, hermes_block(t, indent, step, nl)), "Replaced"));
     }
 
     let Some(p) = lines.iter().position(|l| l.starts_with("providers:")) else {
@@ -612,7 +617,7 @@ fn hermes_merge(text: &str, path: &Path, t: &Target, key: &str) -> Result<(Strin
             out.push_str(nl);
         }
         out.push_str(&format!("providers:{nl}"));
-        out.push_str(&hermes_block(t, key, "  ", "  ", nl));
+        out.push_str(&hermes_block(t, "  ", "  ", nl));
         return Ok((out, "Added"));
     };
 
@@ -643,7 +648,7 @@ fn hermes_merge(text: &str, path: &Path, t: &Target, key: &str) -> Result<(Strin
     });
     if let Some(start) = ours {
         let end = entry_end(&lines, start, indent.len());
-        return Ok((splice(start, end, hermes_block(t, key, indent, indent, nl)), "Replaced"));
+        return Ok((splice(start, end, hermes_block(t, indent, indent, nl)), "Replaced"));
     }
 
     let header = if empty_flow {
@@ -657,7 +662,7 @@ fn hermes_merge(text: &str, path: &Path, t: &Target, key: &str) -> Result<(Strin
     if !out.ends_with('\n') {
         out.push_str(nl);
     }
-    out.push_str(&hermes_block(t, key, indent, indent, nl));
+    out.push_str(&hermes_block(t, indent, indent, nl));
     out.push_str(&lines[p + 1..].concat());
     Ok((out, "Added"))
 }
@@ -671,11 +676,10 @@ fn hermes_switch_hint() -> String {
 
 fn hermes_print(env: &Env, t: &Target) -> String {
     format!(
-        "Add under `providers:` in {}:\n\n{}\n`--apply` writes it with this machine's local key filled in, and installs \
-         `pai service`, which starts pai's local proxy when you log in: Hermes can't start it itself.\n\n\
-         Run `pai setup hermes --apply` to do both.\n\n{}",
+        "Add under `providers:` in {}:\n\n{}\nHermes runs `pai token` for its key (it needs a Hermes release from \
+         August 2026 or later, which supports `key_cmd`). Run `pai setup hermes --apply` to write it.\n\n{}",
         hermes_config_path(env).display(),
-        hermes_block(t, HERMES_KEY_PLACEHOLDER, "  ", "  ", "\n"),
+        hermes_block(t, "  ", "  ", "\n"),
         hermes_switch_hint()
     )
 }
@@ -687,25 +691,10 @@ fn hermes_apply(env: &Env, t: &Target) -> Result<String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(io_err("read", &path, e)),
     };
-    let key = crate::app::local_key(env)?;
-    let (merged, what) = hermes_merge(&text, &path, t, &key)?;
+    let (merged, what) = hermes_merge(&text, &path, t)?;
     let mut log = String::new();
     write_file(&path, &merged, env.clock.now(), &mut log)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        // It now holds the local key, which any account on this machine could use with the proxy.
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|e| io_err("protect", &path, e))?;
-    }
-    log.push_str(&format!("{what} the {PROVIDER_ID} provider.\n"));
-
-    log.push_str("Installing `pai service` so pai's local proxy runs whenever you're logged in; Hermes can't start it itself.\n");
-    match crate::service::install(env) {
-        Ok(lines) => lines.iter().for_each(|l| log.push_str(&format!("{l}\n"))),
-        Err(e) => log.push_str(&format!(
-            "Couldn't install the service: {e}.\nUntil it's installed, run `pai token` before starting Hermes.\n"
-        )),
-    }
+    log.push_str(&format!("{what} the {PROVIDER_ID} provider. Hermes runs `pai token` for its key.\n"));
     log.push_str(&hermes_switch_hint());
     Ok(log)
 }

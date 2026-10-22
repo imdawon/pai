@@ -220,7 +220,6 @@ fn hermes_adds_provider_and_keeps_everything_else() {
 
     let out = setup::run(&t.env, Tool::Hermes, &target(&t, 65536), true).unwrap();
     assert!(out.contains("Backed up") && out.contains("Added the privacy-ai provider"), "{out}");
-    assert!(out.contains("pai service"), "{out}");
     assert!(out.contains("/model custom:privacy-ai:qwen3.8-27b"), "{out}");
     assert_eq!(backups(&t.home().join(".hermes")).len(), 1);
 
@@ -237,23 +236,11 @@ fn hermes_adds_provider_and_keeps_everything_else() {
         assert!(block.contains(line), "missing {line:?} in\n{block}");
     }
 
-    let key = pai::app::local_key(&t.env).unwrap();
-    assert!(block.contains(&format!("    api_key: \"{key}\"\n")), "{block}");
-    assert_eq!(text.matches(&key).count(), 1, "the local key is only in our block");
-    for b in backups(&t.home().join(".hermes")) {
-        assert!(!fs::read_to_string(t.home().join(".hermes").join(b)).unwrap().contains(&key));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = fs::metadata(hermes_path(&t)).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600);
-    }
-
-    if pai::service::file(&t.env).is_some() {
-        assert!(pai::service::installed(&t.env), "--apply installs the login service");
-        assert!(!t.env.commands.recorded().is_empty());
-    }
+    assert!(block.contains("    key_cmd: \"/opt/pai/bin/pai token\"\n"), "{block}");
+    assert!(block.contains("    api_mode: chat_completions\n"), "{block}");
+    assert!(!text.contains("pai-local-"), "no key is written into the file");
+    assert!(!text.contains("api_key: \"pai"), "{text}");
+    assert!(t.env.commands.recorded().is_empty(), "Hermes starts pai itself, so no login service is installed");
 }
 
 #[test]
@@ -326,7 +313,7 @@ fn hermes_follows_hermes_home() {
     t.env.vars.insert("HERMES_HOME".into(), dir.to_string_lossy().into_owned());
     let out = setup::run(&t.env, Tool::Hermes, &target(&t, 65536), false).unwrap();
     assert!(out.contains(&dir.join("config.yaml").display().to_string()), "{out}");
-    assert!(out.contains("<the output of `pai token`>"), "{out}");
+    assert!(out.contains("key_cmd: \"/opt/pai/bin/pai token\""), "{out}");
     setup::run(&t.env, Tool::Hermes, &target(&t, 65536), true).unwrap();
     assert!(dir.join("config.yaml").exists());
     assert!(!t.home().join(".hermes").exists());
