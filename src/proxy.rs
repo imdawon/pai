@@ -12,7 +12,7 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures_util::TryStreamExt;
-use pai_proto::day_number;
+use pai_proto::{Credential, Period, period_now};
 use serde_json::json;
 use tokio::sync::Notify;
 
@@ -114,7 +114,7 @@ pub fn run(env: Env) -> Result<()> {
             stop: Notify::new(),
         });
         if proxy.env.prefetch {
-            tokio::spawn(prefetch_daily(proxy.env.clone()));
+            tokio::spawn(prefetch_loop(proxy.env.clone()));
         }
         let app = Router::new().fallback(handle).with_state(proxy.clone());
         axum::serve(listener, app)
@@ -124,19 +124,29 @@ pub fn run(env: Env) -> Result<()> {
     })
 }
 
-/// Once a day, at a random time, collect tomorrow's credential.
-async fn prefetch_daily(env: Env) {
+/// Once a period (a day, or an hour on the 1-day trial), at a random time, collect the next
+/// period's credential. The plan comes from the credential this computer already holds.
+async fn prefetch_loop(env: Env) {
     loop {
         let now = env.clock.now();
-        if let Some(delay) = app::prefetch_delay(now) {
-            let tomorrow = day_number(now) + 1;
+        let plan = {
+            let e = env.clone();
+            tokio::task::spawn_blocking(move || app::held_plan(&e)).await.ok().flatten()
+        };
+        let Some(plan) = plan else {
+            tokio::time::sleep(Duration::from_secs(300)).await;
+            continue;
+        };
+        let period = Period::of(plan);
+        if let Some(delay) = app::prefetch_delay(period, now) {
+            let target = period_now(plan, now) + 1;
             tokio::time::sleep(delay).await;
             let e = env.clone();
-            let _ = tokio::task::spawn_blocking(move || app::prefetch(&e, tomorrow, Duration::ZERO)).await;
+            let _ = tokio::task::spawn_blocking(move || app::prefetch(&e, plan, target, Duration::ZERO)).await;
         }
         let now = env.clock.now();
-        let until_tomorrow = 86_400 - now.rem_euclid(86_400) + 5;
-        tokio::time::sleep(Duration::from_secs(until_tomorrow as u64)).await;
+        let until_next = period.secs() - now.rem_euclid(period.secs()) + 5;
+        tokio::time::sleep(Duration::from_secs(until_next as u64)).await;
     }
 }
 
@@ -191,8 +201,9 @@ async fn handle(State(p): State<Arc<Proxy>>, req: Request) -> Response {
 
 impl Proxy {
     async fn credential(&self, refresh: bool) -> std::result::Result<String, Response> {
-        let today = day_number(self.env.clock.now());
-        if !refresh && let Some((day, c)) = self.credential.lock().unwrap().clone() && day == today {
+        let now = self.env.clock.now();
+        let current = |c: &str| Credential::decode(c).is_ok_and(|c| c.day == period_now(c.plan, now));
+        if !refresh && let Some((_, c)) = self.credential.lock().unwrap().clone() && current(&c) {
             return Ok(c);
         }
         let env = self.env.clone();
@@ -201,7 +212,7 @@ impl Proxy {
             .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "api_error", "pai's proxy hit an internal error."))?;
         match got {
             Ok(c) => {
-                *self.credential.lock().unwrap() = Some((today, c.clone()));
+                *self.credential.lock().unwrap() = Some((0, c.clone()));
                 Ok(c)
             }
             Err(e) => {

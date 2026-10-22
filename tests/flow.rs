@@ -358,9 +358,10 @@ fn tomorrows_credential_is_collected_ahead_and_used_without_a_fetch() {
 
     // Yesterday, the background fetch collects the credential for today.
     t.env.clock = Clock::Fixed(now_unix() - 86_400);
-    assert!(!app::prefetch(&t.env, today() + 1, std::time::Duration::ZERO).unwrap(), "only for tomorrow");
-    assert!(app::prefetch(&t.env, today(), std::time::Duration::ZERO).unwrap());
-    assert!(!app::prefetch(&t.env, today(), std::time::Duration::ZERO).unwrap(), "already collected");
+    let zero = std::time::Duration::ZERO;
+    assert!(!app::prefetch(&t.env, Plan::Chat, today() + 1, zero).unwrap(), "only for tomorrow");
+    assert!(app::prefetch(&t.env, Plan::Chat, today(), zero).unwrap());
+    assert!(!app::prefetch(&t.env, Plan::Chat, today(), zero).unwrap(), "already collected");
     assert_eq!(relay.issued(), 1);
 
     // Today, `pai token` uses it and asks the relay for nothing.
@@ -374,11 +375,16 @@ fn tomorrows_credential_is_collected_ahead_and_used_without_a_fetch() {
 }
 
 #[test]
-fn prefetch_waits_a_random_time_within_the_day() {
+fn prefetch_waits_a_random_time_within_the_period() {
+    use pai_proto::Period;
     let midnight = 20_000 * 86_400;
     for _ in 0..200 {
-        let d = app::prefetch_delay(midnight + 3_600).unwrap().as_secs() as i64;
+        let d = app::prefetch_delay(Period::Day, midnight + 3_600).unwrap().as_secs() as i64;
         assert!((0..86_400 - 3_600 - 900).contains(&d), "{d}");
+        // On the 1-day trial, the next hour's credential is collected within this hour.
+        let h = app::prefetch_delay(Period::Hour, midnight + 600).unwrap().as_secs() as i64;
+        assert!((0..3_600 - 600 - 300).contains(&h), "{h}");
     }
-    assert!(app::prefetch_delay(midnight + 86_400 - 600).is_none());
+    assert!(app::prefetch_delay(Period::Day, midnight + 86_400 - 600).is_none());
+    assert!(app::prefetch_delay(Period::Hour, midnight + 3_600 - 120).is_none());
 }

@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use pai_proto::ed25519_dalek::SigningKey;
 use pai_proto::{
-    CredentialRequest, DeviceKind, NewDevice, PairRequest, PendingCredential, Plan, b64,
-    day_number, unb64,
+    CredentialRequest, DeviceKind, NewDevice, PairRequest, Period, PendingCredential, Plan, b64,
+    day_number, period_now, unb64,
 };
 use zeroize::Zeroizing;
 
@@ -249,18 +249,26 @@ pub fn pair(
     Ok(config)
 }
 
-fn cached_credential(env: &Env, day: u32) -> Result<Option<String>> {
-    stored_credential(env, CREDENTIAL, day)
-}
-
-fn stored_credential(env: &Env, name: &str, day: u32) -> Result<Option<String>> {
+/// The credential for the current period (offset 0) or the next (offset 1). A period is a UTC
+/// day, or a UTC hour on the 1-day trial; the stored credential says which plan it's for.
+fn stored_credential(env: &Env, name: &str, offset: u32) -> Result<Option<String>> {
     let Some(stored) = env.keystore.get(name)? else {
         return Ok(None);
     };
     match pai_proto::Credential::decode(&stored) {
-        Ok(c) if c.day == day => Ok(Some(stored.to_string())),
+        Ok(c) if c.day == period_now(c.plan, env.clock.now()) + offset => Ok(Some(stored.to_string())),
         _ => Ok(None),
     }
+}
+
+fn cached_credential(env: &Env) -> Result<Option<String>> {
+    stored_credential(env, CREDENTIAL, 0)
+}
+
+/// The plan of the credential this computer holds, without asking the relay.
+pub fn held_plan(env: &Env) -> Option<Plan> {
+    let stored = env.keystore.get(CREDENTIAL).ok()??;
+    pai_proto::Credential::decode(&stored).ok().map(|c| c.plan)
 }
 
 /// Serializes credential fetches across processes: tools start several `pai token` at once,
@@ -279,12 +287,12 @@ fn lock(env: &Env) -> Result<fs::File> {
     Ok(file)
 }
 
-/// Returns today's credential. It comes from the cache, or from the one collected yesterday in
-/// the background; only when neither is there (or `refresh` is set) is one fetched now.
+/// Returns the credential for the current period. It comes from the cache, or from the one
+/// collected in the background during the last period; only when neither is there (or `refresh`
+/// is set) is one fetched now.
 pub fn credential(env: &Env, refresh: bool) -> Result<String> {
     let config = env.paired()?;
-    let today = day_number(env.clock.now());
-    let got = current_credential(env, &config, today, refresh);
+    let got = current_credential(env, &config, refresh);
     if matches!(got, Err(Error::DeviceRemoved)) {
         open_web_app(env, &config);
     }
@@ -498,28 +506,29 @@ pub fn token(env: &Env) -> Result<String> {
     local_key(env)
 }
 
-fn current_credential(env: &Env, config: &Config, today: u32, refresh: bool) -> Result<String> {
-    if !refresh && let Some(c) = cached_credential(env, today)? {
+fn current_credential(env: &Env, config: &Config, refresh: bool) -> Result<String> {
+    if !refresh && let Some(c) = cached_credential(env)? {
         return Ok(c);
     }
     let _lock = lock(env)?;
     if !refresh {
-        if let Some(c) = cached_credential(env, today)? {
+        if let Some(c) = cached_credential(env)? {
             return Ok(c);
         }
-        if let Some(c) = stored_credential(env, NEXT_CREDENTIAL, today)? {
+        if let Some(c) = stored_credential(env, NEXT_CREDENTIAL, 0)? {
             env.keystore.set(CREDENTIAL, &c)?;
             env.keystore.delete(NEXT_CREDENTIAL)?;
             return Ok(c);
         }
     }
-    let encoded = fetch_credential(env, config, today)?;
+    let (encoded, _) = fetch_credential(env, config, 0)?;
     env.keystore.set(CREDENTIAL, &encoded)?;
     Ok(encoded)
 }
 
-/// Asks the relay for a blind-signed credential for `day`, which is today or tomorrow.
-fn fetch_credential(env: &Env, config: &Config, day: u32) -> Result<String> {
+/// Asks the relay for a blind-signed credential for the current period (`offset` 0) or the next
+/// (1). Returns it with its period number.
+fn fetch_credential(env: &Env, config: &Config, offset: u32) -> Result<(String, u32)> {
     let key = env.device_key()?;
     let relay = env.relay(config, env.relay_timeout)?;
     let account = relay.account(&key, &config.device_id)?;
@@ -529,6 +538,7 @@ fn fetch_credential(env: &Env, config: &Config, day: u32) -> Result<String> {
     let plan = account.credential_plan.ok_or_else(|| Error::NotPaid {
         detail: format!("status: {}", account.status),
     })?;
+    let day = period_now(plan, env.clock.now()) + offset;
 
     let keys = relay.keys()?;
     let info = keys
@@ -537,7 +547,7 @@ fn fetch_credential(env: &Env, config: &Config, day: u32) -> Result<String> {
         .find(|k| k.plan == plan && k.day == day)
         .ok_or_else(|| {
             Error::BadIssuerResponse(format!(
-                "it has no {} key for UTC day {day}; check that this computer's date is right",
+                "it has no {} key for period {day}; check that this computer's date and time are right",
                 plan.as_str()
             ))
         })?;
@@ -560,42 +570,49 @@ fn fetch_credential(env: &Env, config: &Config, day: u32) -> Result<String> {
     credential
         .verify(&issuer)
         .map_err(|_| Error::BadIssuerResponse("the signature doesn't verify".into()))?;
-    Ok(credential.encode())
+    Ok((credential.encode(), day))
 }
 
-/// Leave this much of the day unused, so a late fetch still lands before midnight.
-const PREFETCH_MARGIN_SECS: i64 = 15 * 60;
+/// Leave the end of each period unused, so a late fetch still lands before the period ends.
+fn prefetch_margin(period: Period) -> i64 {
+    match period {
+        Period::Day => 15 * 60,
+        Period::Hour => 5 * 60,
+    }
+}
 
-/// A uniformly random wait between now and shortly before the end of the UTC day, or `None`
-/// when the day is nearly over.
-pub fn prefetch_delay(now: i64) -> Option<Duration> {
-    let left = DAY_SECS - now.rem_euclid(DAY_SECS) - PREFETCH_MARGIN_SECS;
+/// A uniformly random wait between now and shortly before the current period ends (a UTC day, or
+/// an hour on the 1-day trial), or `None` when it's nearly over.
+pub fn prefetch_delay(period: Period, now: i64) -> Option<Duration> {
+    let left = period.secs() - now.rem_euclid(period.secs()) - prefetch_margin(period);
     if left <= 0 {
         return None;
     }
     Some(Duration::from_secs(rand::Rng::gen_range(&mut rand::rngs::OsRng, 0..left as u64)))
 }
 
-const DAY_SECS: i64 = 86_400;
-
-/// Collects the credential for `day` (tomorrow) and keeps it for the next day. The proxy runs it
-/// at a random time, so the time it's fetched, which the relay sees, says nothing about when
-/// it's used.
-pub fn prefetch(env: &Env, day: u32, delay: Duration) -> Result<bool> {
-    if day_number(env.clock.now()) + 1 != day {
+/// Collects the next period's credential (`target`) for `plan` and keeps it for then. The proxy
+/// runs it at a random time in the current period, so the time it's fetched, which the relay
+/// sees, says nothing about when it's used.
+pub fn prefetch(env: &Env, plan: Plan, target: u32, delay: Duration) -> Result<bool> {
+    if period_now(plan, env.clock.now()) + 1 != target {
         return Ok(false);
     }
     std::thread::sleep(delay);
-    // The computer may have slept through the end of the day.
-    if day_number(env.clock.now()) + 1 != day {
+    // The computer may have slept through the end of the period.
+    if period_now(plan, env.clock.now()) + 1 != target {
         return Ok(false);
     }
     let config = env.paired()?;
     let _lock = lock(env)?;
-    if stored_credential(env, NEXT_CREDENTIAL, day)?.is_some() {
+    if stored_credential(env, NEXT_CREDENTIAL, 1)?.is_some() {
         return Ok(false);
     }
-    let encoded = fetch_credential(env, &config, day)?;
+    let (encoded, period) = fetch_credential(env, &config, 1)?;
+    // The plan can change between periods; keep only what will be valid then.
+    if period != target {
+        return Ok(false);
+    }
     env.keystore.set(NEXT_CREDENTIAL, &encoded)?;
     Ok(true)
 }
@@ -605,6 +622,8 @@ pub struct Status {
     pub plan: String,
     pub credential_today: bool,
     pub credential_tomorrow: bool,
+    /// The held credential is a 1-day trial one, valid per hour rather than per day.
+    pub hourly: bool,
     pub proxy: String,
     pub service: String,
     pub trust: Trust,
@@ -622,6 +641,7 @@ pub fn status(env: &Env) -> Result<Status> {
             plan: "-".into(),
             credential_today: false,
             credential_tomorrow: false,
+            hourly: false,
             proxy: "-".into(),
             service: crate::service::describe(env),
             trust: trust(env, None),
@@ -629,10 +649,10 @@ pub fn status(env: &Env) -> Result<Status> {
             device_removed: false,
         });
     };
-    let today = day_number(env.clock.now());
-    let credential_today = cached_credential(env, today).ok().flatten().is_some()
-        || stored_credential(env, NEXT_CREDENTIAL, today).ok().flatten().is_some();
-    let credential_tomorrow = stored_credential(env, NEXT_CREDENTIAL, today + 1).ok().flatten().is_some();
+    let credential_today = cached_credential(env).ok().flatten().is_some()
+        || stored_credential(env, NEXT_CREDENTIAL, 0).ok().flatten().is_some();
+    let credential_tomorrow = stored_credential(env, NEXT_CREDENTIAL, 1).ok().flatten().is_some();
+    let hourly = held_plan(env).is_some_and(|p| Period::of(p) == Period::Hour);
     let mut device_removed = false;
     let plan = match env.device_key() {
         Err(e) => format!("unknown ({e})"),
@@ -659,6 +679,7 @@ pub fn status(env: &Env) -> Result<Status> {
         plan,
         credential_today,
         credential_tomorrow,
+        hourly,
         proxy: match env.keystore.get(PROXY_KEY).ok().flatten().and_then(|k| proxy_health(env, &k)) {
             Some(_) => format!("running at {}", crate::proxy::url(env)),
             None => format!("not running (coding tools start it with `pai token`); {}", crate::proxy::url(env)),
@@ -683,11 +704,15 @@ impl std::fmt::Display for Status {
         writeln!(
             f,
             "Credential: {}",
-            match (self.credential_today, self.credential_tomorrow) {
-                (true, true) => "yes, for today and tomorrow",
-                (true, false) => "yes, for today",
-                (false, true) => "none for today; tomorrow's is ready",
-                (false, false) => "none for today",
+            match (self.hourly, self.credential_today, self.credential_tomorrow) {
+                (false, true, true) => "yes, for today and tomorrow",
+                (false, true, false) => "yes, for today",
+                (false, false, true) => "none for today; tomorrow's is ready",
+                (false, false, false) => "none for today",
+                (true, true, true) => "yes, for this hour and the next (1-day trial)",
+                (true, true, false) => "yes, for this hour (1-day trial)",
+                (true, false, true) => "none for this hour; the next hour's is ready (1-day trial)",
+                (true, false, false) => "none for this hour (1-day trial)",
             }
         )?;
         writeln!(f, "Relay:      {}", c.relay_url)?;
