@@ -26,6 +26,9 @@ rand = "0.8"
 gethostname = "1"
 zeroize = "1"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 axum = "0.8"
 tempfile = "3"

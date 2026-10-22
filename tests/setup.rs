@@ -26,11 +26,13 @@ fn backups(dir: &std::path::Path) -> Vec<String> {
 #[test]
 fn print_mode_writes_nothing() {
     let t = TestEnv::new();
-    for tool in [Tool::ClaudeCode, Tool::Codex, Tool::Opencode, Tool::Omp] {
+    for tool in [Tool::ClaudeCode, Tool::Codex, Tool::Opencode, Tool::Omp, Tool::Hermes] {
         let out = setup::run(&t.env, tool, &target(&t, 262144), false).unwrap();
         assert!(out.contains("127.0.0.1:47821"), "{out}");
     }
     assert!(!t.home().exists());
+    assert!(t.env.keystore.get(pai::keystore::PROXY_KEY).unwrap().is_none(), "print mode makes no key");
+    assert!(t.env.commands.recorded().is_empty());
 }
 
 #[test]
@@ -169,4 +171,163 @@ fn omp_writes_extension() {
     assert!(ext.contains("const DEFAULT_PAI_BIN = \"/opt/pai/bin/pai\";\n"));
     assert!(ext.contains("const CONTEXT_WINDOW = 262144;\n"));
     assert!(ext.contains("registerProvider"));
+}
+
+const HERMES_CONFIG: &str = "\
+# Hermes config: my dev box
+model:
+  default: qwen3.8-27b # keep this
+  provider: custom
+  base_url: http://127.0.0.1:8080/v1
+  api_key: dummy
+  context_length: 262144
+
+# Providers I run locally
+providers:
+  # llama.cpp on this box
+  local-localhost:8080:
+    api: http://127.0.0.1:8080/v1
+    name: Local (localhost:8080)
+    api_key: dummy
+    default_model: glm5.3-flash
+    models:
+      glm5.3-flash:
+        context_length: 262144 # long
+      qwen3.8-27b:
+        context_length: 262144
+# fallbacks off for now
+fallback_providers: []
+";
+
+fn hermes_path(t: &TestEnv) -> std::path::PathBuf {
+    t.home().join(".hermes").join("config.yaml")
+}
+
+/// Our block, from its marker to its end marker, and the file with it cut out.
+fn split_block(text: &str) -> (String, String) {
+    let begin = text.find("# privacy-ai (managed by pai setup hermes)").expect("our block");
+    let begin = text[..begin].rfind('\n').map_or(0, |i| i + 1);
+    let end_marker = "# end privacy-ai\n";
+    let end = text[begin..].find(end_marker).unwrap() + begin + end_marker.len();
+    (text[begin..end].to_string(), format!("{}{}", &text[..begin], &text[end..]))
+}
+
+#[test]
+fn hermes_adds_provider_and_keeps_everything_else() {
+    let t = TestEnv::with_config();
+    fs::create_dir_all(t.home().join(".hermes")).unwrap();
+    fs::write(hermes_path(&t), HERMES_CONFIG).unwrap();
+
+    let out = setup::run(&t.env, Tool::Hermes, &target(&t, 65536), true).unwrap();
+    assert!(out.contains("Backed up") && out.contains("Added the privacy-ai provider"), "{out}");
+    assert!(out.contains("pai service"), "{out}");
+    assert!(out.contains("/model custom:privacy-ai:qwen3.8-27b"), "{out}");
+    assert_eq!(backups(&t.home().join(".hermes")).len(), 1);
+
+    let text = fs::read_to_string(hermes_path(&t)).unwrap();
+    let (block, rest) = split_block(&text);
+    assert_eq!(rest, HERMES_CONFIG, "everything outside our block is untouched");
+    assert!(text.contains("providers:\n  # privacy-ai (managed by pai setup hermes)\n  privacy-ai:\n"), "{text}");
+    for line in [
+        "    name: Privacy AI\n",
+        "    api: \"http://127.0.0.1:47821/v1\"\n",
+        "    default_model: qwen3.8-27b\n",
+        "    models:\n      qwen3.8-27b:\n        context_length: 65536\n",
+    ] {
+        assert!(block.contains(line), "missing {line:?} in\n{block}");
+    }
+
+    let key = pai::app::local_key(&t.env).unwrap();
+    assert!(block.contains(&format!("    api_key: \"{key}\"\n")), "{block}");
+    assert_eq!(text.matches(&key).count(), 1, "the local key is only in our block");
+    for b in backups(&t.home().join(".hermes")) {
+        assert!(!fs::read_to_string(t.home().join(".hermes").join(b)).unwrap().contains(&key));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(hermes_path(&t)).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    if pai::service::file(&t.env).is_some() {
+        assert!(pai::service::installed(&t.env), "--apply installs the login service");
+        assert!(!t.env.commands.recorded().is_empty());
+    }
+}
+
+#[test]
+fn hermes_rerun_replaces_its_block() {
+    let t = TestEnv::with_config();
+    fs::create_dir_all(t.home().join(".hermes")).unwrap();
+    fs::write(hermes_path(&t), HERMES_CONFIG).unwrap();
+
+    setup::run(&t.env, Tool::Hermes, &target(&t, 65536), true).unwrap();
+    let out = setup::run(&t.env, Tool::Hermes, &target(&t, 262144), true).unwrap();
+    assert!(out.contains("Replaced the privacy-ai provider"), "{out}");
+    let text = fs::read_to_string(hermes_path(&t)).unwrap();
+    assert_eq!(text.matches("privacy-ai:").count(), 1, "{text}");
+    assert_eq!(text.matches("# privacy-ai (managed by pai setup hermes)").count(), 1);
+    assert!(text.contains("context_length: 262144\n  # end privacy-ai"), "{text}");
+    assert_eq!(split_block(&text).1, HERMES_CONFIG);
+
+    // An unmarked privacy-ai entry, as left by hand or a tool that dropped comments, is replaced too.
+    let (block, _) = split_block(&text);
+    let bare: String = block.lines().filter(|l| !l.trim_start().starts_with('#')).map(|l| format!("{l}\n")).collect();
+    fs::write(hermes_path(&t), HERMES_CONFIG.replace("providers:\n", &format!("providers:\n{bare}"))).unwrap();
+    setup::run(&t.env, Tool::Hermes, &target(&t, 262144), true).unwrap();
+    let text = fs::read_to_string(hermes_path(&t)).unwrap();
+    assert_eq!(text.matches("privacy-ai:").count(), 1, "{text}");
+    assert_eq!(split_block(&text).1, HERMES_CONFIG);
+}
+
+#[test]
+fn hermes_creates_providers_when_missing() {
+    let t = TestEnv::with_config();
+    let original = "# just a model\nmodel:\n  default: some-model\n  provider: auto";
+    fs::create_dir_all(t.home().join(".hermes")).unwrap();
+    fs::write(hermes_path(&t), original).unwrap();
+
+    setup::run(&t.env, Tool::Hermes, &target(&t, 65536), true).unwrap();
+    let text = fs::read_to_string(hermes_path(&t)).unwrap();
+    assert!(text.starts_with(&format!("{original}\n\nproviders:\n  # privacy-ai (managed by pai setup hermes)\n")), "{text}");
+    assert!(text.contains("  default: some-model\n"), "the default model is left alone");
+
+    let empty = TestEnv::with_config();
+    setup::run(&empty.env, Tool::Hermes, &target(&empty, 65536), true).unwrap();
+    let text = fs::read_to_string(hermes_path(&empty)).unwrap();
+    assert!(text.starts_with("providers:\n  # privacy-ai"), "{text}");
+}
+
+#[test]
+fn hermes_handles_four_space_indent_crlf_and_empty_flow() {
+    let t = TestEnv::with_config();
+    fs::create_dir_all(t.home().join(".hermes")).unwrap();
+    fs::write(hermes_path(&t), "providers:\r\n    other:\r\n        api: http://x/v1\r\n").unwrap();
+    setup::run(&t.env, Tool::Hermes, &target(&t, 65536), true).unwrap();
+    let text = fs::read_to_string(hermes_path(&t)).unwrap();
+    assert!(text.contains("providers:\r\n    # privacy-ai (managed by pai setup hermes)\r\n    privacy-ai:\r\n        name: Privacy AI\r\n"), "{text:?}");
+    assert!(text.ends_with("    # end privacy-ai\r\n    other:\r\n        api: http://x/v1\r\n"), "{text:?}");
+
+    fs::write(hermes_path(&t), "providers: {} # none yet\n").unwrap();
+    setup::run(&t.env, Tool::Hermes, &target(&t, 65536), true).unwrap();
+    let text = fs::read_to_string(hermes_path(&t)).unwrap();
+    assert!(text.starts_with("providers: # none yet\n  # privacy-ai"), "{text}");
+
+    fs::write(hermes_path(&t), "providers: {a: {api: x}}\n").unwrap();
+    assert!(setup::run(&t.env, Tool::Hermes, &target(&t, 65536), true).is_err());
+    assert_eq!(fs::read_to_string(hermes_path(&t)).unwrap(), "providers: {a: {api: x}}\n");
+}
+
+#[test]
+fn hermes_follows_hermes_home() {
+    let mut t = TestEnv::with_config();
+    let dir = t.dir.path().join("hermes-home");
+    t.env.vars.insert("HERMES_HOME".into(), dir.to_string_lossy().into_owned());
+    let out = setup::run(&t.env, Tool::Hermes, &target(&t, 65536), false).unwrap();
+    assert!(out.contains(&dir.join("config.yaml").display().to_string()), "{out}");
+    assert!(out.contains("<the output of `pai token`>"), "{out}");
+    setup::run(&t.env, Tool::Hermes, &target(&t, 65536), true).unwrap();
+    assert!(dir.join("config.yaml").exists());
+    assert!(!t.home().join(".hermes").exists());
 }

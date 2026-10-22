@@ -18,6 +18,7 @@ pub enum Tool {
     Codex,
     Opencode,
     Omp,
+    Hermes,
 }
 
 /// What every tool's config is built from.
@@ -67,6 +68,8 @@ pub fn run(env: &Env, tool: Tool, target: &Target, apply: bool) -> Result<String
         (Tool::Opencode, true) => opencode_apply(env, target)?,
         (Tool::Omp, false) => omp_print(env, target),
         (Tool::Omp, true) => omp_apply(env, target)?,
+        (Tool::Hermes, false) => hermes_print(env, target),
+        (Tool::Hermes, true) => hermes_apply(env, target)?,
     };
     out.push_str(&body);
     Ok(out)
@@ -142,6 +145,11 @@ fn shell_word(s: &str) -> String {
 
 /// TOML basic strings use JSON's escapes.
 fn toml_str(s: &str) -> String {
+    serde_json::to_string(s).expect("string serializes")
+}
+
+/// JSON strings are YAML double-quoted scalars.
+fn yaml_str(s: &str) -> String {
     serde_json::to_string(s).expect("string serializes")
 }
 
@@ -489,6 +497,216 @@ fn omp_apply(env: &Env, t: &Target) -> Result<String> {
     log.push_str(&format!(
         "Restart OMP and pick {PROVIDER_ID}/{MODEL} with /model, or start `omp --model {PROVIDER_ID}/{MODEL}`.\n"
     ));
+    Ok(log)
+}
+
+// Hermes Agent: https://github.com/NousResearch/hermes-agent cli-config.yaml.example,
+// https://hermes-agent.nousresearch.com/docs/integrations/providers
+
+const HERMES_BEGIN: &str = "# privacy-ai (managed by pai setup hermes)";
+const HERMES_END: &str = "# end privacy-ai";
+const HERMES_KEY_PLACEHOLDER: &str = "<the output of `pai token`>";
+
+fn hermes_dir(env: &Env) -> PathBuf {
+    if let Some(d) = env.var("HERMES_HOME") {
+        return match d.strip_prefix("~/").or_else(|| d.strip_prefix("~\\")) {
+            Some(rest) => env.paths.home.join(rest),
+            None => PathBuf::from(d),
+        };
+    }
+    if cfg!(windows)
+        && let Some(local) = env.var("LOCALAPPDATA")
+    {
+        return PathBuf::from(local).join("hermes");
+    }
+    env.paths.home.join(".hermes")
+}
+
+fn hermes_config_path(env: &Env) -> PathBuf {
+    hermes_dir(env).join("config.yaml")
+}
+
+fn hermes_block(t: &Target, key: &str, indent: &str, step: &str, nl: &str) -> String {
+    let i1 = format!("{indent}{step}");
+    let i2 = format!("{i1}{step}");
+    let i3 = format!("{i2}{step}");
+    [
+        format!("{indent}{HERMES_BEGIN}"),
+        format!("{indent}{PROVIDER_ID}:"),
+        format!("{i1}name: Privacy AI"),
+        format!("{i1}api: {}", yaml_str(&format!("{}/v1", t.base_url))),
+        format!("{i1}api_key: {}", yaml_str(key)),
+        format!("{i1}transport: chat_completions"),
+        format!("{i1}default_model: {MODEL}"),
+        format!("{i1}models:"),
+        format!("{i2}{MODEL}:"),
+        format!("{i3}context_length: {}", t.context),
+        format!("{indent}{HERMES_END}"),
+    ]
+    .iter()
+    .map(|l| format!("{l}{nl}"))
+    .collect()
+}
+
+fn indent_of(line: &str) -> &str {
+    &line[..line.len() - line.trim_start_matches([' ', '\t']).len()]
+}
+
+fn is_blank(line: &str) -> bool {
+    line.trim().is_empty()
+}
+
+fn is_comment(line: &str) -> bool {
+    line.trim_start().starts_with('#')
+}
+
+/// The end of the mapping entry whose key is on `lines[start]`: every following line that's
+/// blank or indented deeper, minus trailing blank lines.
+fn entry_end(lines: &[&str], start: usize, indent: usize) -> usize {
+    let mut end = start + 1;
+    let mut last = end;
+    while end < lines.len() && (is_blank(lines[end]) || indent_of(lines[end]).len() > indent) {
+        end += 1;
+        if !is_blank(lines[end - 1]) {
+            last = end;
+        }
+    }
+    last
+}
+
+/// Puts our provider into a Hermes config.yaml by editing the text, so the user's comments and
+/// layout survive: a YAML library would drop them. Replaces our marked block, or an unmarked
+/// `privacy-ai` provider, or adds the block under `providers:`, creating that if needed.
+fn hermes_merge(text: &str, path: &Path, t: &Target, key: &str) -> Result<(String, &'static str)> {
+    let nl = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let splice = |from: usize, to: usize, block: String| -> String {
+        let mut out: String = lines[..from].concat();
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push_str(nl);
+        }
+        out.push_str(&block);
+        out.push_str(&lines[to..].concat());
+        out
+    };
+
+    if let Some(begin) = lines.iter().position(|l| l.trim() == HERMES_BEGIN) {
+        let indent = indent_of(lines[begin]);
+        let end = match lines[begin + 1..].iter().position(|l| l.trim() == HERMES_END) {
+            Some(n) => begin + 1 + n + 1,
+            None => match lines.get(begin + 1) {
+                Some(l) if indent_of(l) == indent && !is_comment(l) => entry_end(&lines, begin + 1, indent.len()),
+                _ => begin + 1,
+            },
+        };
+        let step = if indent.is_empty() { "  " } else { indent };
+        return Ok((splice(begin, end, hermes_block(t, key, indent, step, nl)), "Replaced"));
+    }
+
+    let Some(p) = lines.iter().position(|l| l.starts_with("providers:")) else {
+        let mut out = text.to_string();
+        if !out.is_empty() {
+            if !out.ends_with('\n') {
+                out.push_str(nl);
+            }
+            out.push_str(nl);
+        }
+        out.push_str(&format!("providers:{nl}"));
+        out.push_str(&hermes_block(t, key, "  ", "  ", nl));
+        return Ok((out, "Added"));
+    };
+
+    let rest = lines[p]["providers:".len()..].trim();
+    let value = rest.split(" #").next().unwrap_or("").trim();
+    let empty_flow = value == "{}" || value == "~" || value == "null";
+    if !value.is_empty() && !value.starts_with('#') && !empty_flow {
+        return Err(Error::Setup(format!(
+            "`providers:` in {} is written on one line, so pai won't edit it. Run `pai setup hermes` without --apply \
+             and add the provider by hand",
+            path.display()
+        )));
+    }
+
+    let children_end = (p + 1..lines.len())
+        .find(|&i| !is_blank(lines[i]) && !is_comment(lines[i]) && indent_of(lines[i]).is_empty())
+        .unwrap_or(lines.len());
+    let first_child = (p + 1..children_end).find(|&i| !is_blank(lines[i]) && !is_comment(lines[i]));
+    let indent = first_child.map(|i| indent_of(lines[i])).filter(|i| !i.is_empty()).unwrap_or("  ");
+
+    let ours = (p + 1..children_end).find(|&i| {
+        indent_of(lines[i]) == indent && {
+            let k = lines[i].trim();
+            [PROVIDER_ID.to_string(), format!("\"{PROVIDER_ID}\""), format!("'{PROVIDER_ID}'")]
+                .iter()
+                .any(|q| k.strip_prefix(q.as_str()).is_some_and(|r| r.trim_start().starts_with(':')))
+        }
+    });
+    if let Some(start) = ours {
+        let end = entry_end(&lines, start, indent.len());
+        return Ok((splice(start, end, hermes_block(t, key, indent, indent, nl)), "Replaced"));
+    }
+
+    let header = if empty_flow {
+        let comment = rest.find(" #").map(|i| &rest[i..]).unwrap_or("");
+        format!("providers:{comment}{nl}")
+    } else {
+        lines[p].to_string()
+    };
+    let mut out: String = lines[..p].concat();
+    out.push_str(&header);
+    if !out.ends_with('\n') {
+        out.push_str(nl);
+    }
+    out.push_str(&hermes_block(t, key, indent, indent, nl));
+    out.push_str(&lines[p + 1..].concat());
+    Ok((out, "Added"))
+}
+
+fn hermes_switch_hint() -> String {
+    format!(
+        "Your default model stays as it is. To use Privacy AI, type `/model custom:{PROVIDER_ID}:{MODEL}` in Hermes \
+         (add `--global` to make it the default), or run `hermes model` and pick Privacy AI.\n"
+    )
+}
+
+fn hermes_print(env: &Env, t: &Target) -> String {
+    format!(
+        "Add under `providers:` in {}:\n\n{}\n`--apply` writes it with this machine's local key filled in, and installs \
+         `pai service`, which starts pai's local proxy when you log in: Hermes can't start it itself.\n\n\
+         Run `pai setup hermes --apply` to do both.\n\n{}",
+        hermes_config_path(env).display(),
+        hermes_block(t, HERMES_KEY_PLACEHOLDER, "  ", "  ", "\n"),
+        hermes_switch_hint()
+    )
+}
+
+fn hermes_apply(env: &Env, t: &Target) -> Result<String> {
+    let path = hermes_config_path(env);
+    let text = match fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(io_err("read", &path, e)),
+    };
+    let key = crate::app::local_key(env)?;
+    let (merged, what) = hermes_merge(&text, &path, t, &key)?;
+    let mut log = String::new();
+    write_file(&path, &merged, env.clock.now(), &mut log)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // It now holds the local key, which any account on this machine could use with the proxy.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|e| io_err("protect", &path, e))?;
+    }
+    log.push_str(&format!("{what} the {PROVIDER_ID} provider.\n"));
+
+    log.push_str("Installing `pai service` so pai's local proxy runs whenever you're logged in; Hermes can't start it itself.\n");
+    match crate::service::install(env) {
+        Ok(lines) => lines.iter().for_each(|l| log.push_str(&format!("{l}\n"))),
+        Err(e) => log.push_str(&format!(
+            "Couldn't install the service: {e}.\nUntil it's installed, run `pai token` before starting Hermes.\n"
+        )),
+    }
+    log.push_str(&hermes_switch_hint());
     Ok(log)
 }
 

@@ -4,6 +4,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use pai::app::{self, Env};
 use pai::error::Error;
+use pai::service;
 use pai::setup::{self, Tool};
 
 /// Connects coding tools to Privacy AI through a local proxy, so they never hold a credential.
@@ -44,6 +45,11 @@ enum Command {
 
     /// Remove this device from the account and delete its key and config
     Unpair,
+    /// Run the local proxy at login, for tools that can't run `pai token` (macOS and Linux)
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
     /// Print the config a coding tool needs, or write it with --apply
     Setup {
         #[arg(value_enum)]
@@ -52,6 +58,16 @@ enum Command {
         #[arg(long)]
         apply: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum ServiceAction {
+    /// Install the login service and start the proxy with it. Safe to run again.
+    Install,
+    /// Stop the login service and remove it
+    Uninstall,
+    /// Show whether the login service is installed and the proxy is running
+    Status,
 }
 
 fn main() -> ExitCode {
@@ -95,7 +111,7 @@ fn run(command: Command) -> Result<(), Error> {
             if let Some(warning) = app::test_mode_warning(&app::trust(&env, Some(&cfg))) {
                 eprintln!("{warning}");
             }
-            println!("Next: `pai setup <claude-code|codex|opencode|omp> --apply`.");
+            println!("Next: `pai setup <claude-code|codex|opencode|omp|hermes> --apply`.");
         }
         Command::Token => {
             let key = app::token(&env)?;
@@ -112,6 +128,11 @@ fn run(command: Command) -> Result<(), Error> {
                 println!("{line}");
             }
         }
+        Command::Service { action } => match action {
+            ServiceAction::Install => service::install(&env)?.iter().for_each(|l| println!("{l}")),
+            ServiceAction::Uninstall => service::uninstall(&env)?.iter().for_each(|l| println!("{l}")),
+            ServiceAction::Status => print!("{}", service::status(&env)),
+        },
         Command::Setup { tool, apply } => {
             let target = setup::Target::resolve(&env, app::plan_hint(&env));
             print!("{}", setup::run(&env, tool, &target, apply)?);

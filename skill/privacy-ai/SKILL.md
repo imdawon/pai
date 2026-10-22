@@ -1,6 +1,6 @@
 ---
 name: privacy-ai
-description: Connects this coding tool (Claude Code, Codex, OpenCode or OMP) to Privacy AI, the no-logs model API. Installs the `pai` command-line program, pairs this machine with the user's Privacy AI account using a one-time pairing code, and points the tool at `pai token` so it never stores an API key. Use when the user asks to set up, connect, install or fix Privacy AI or `pai`.
+description: Connects this coding tool (Claude Code, Codex, OpenCode, OMP or Hermes Agent) to Privacy AI, the no-logs model API. Installs the `pai` command-line program, pairs this machine with the user's Privacy AI account using a one-time pairing code, and points the tool at `pai token` so it never stores an API key. Use when the user asks to set up, connect, install or fix Privacy AI or `pai`.
 ---
 
 # Connect this tool to Privacy AI
@@ -63,6 +63,7 @@ Use the tool you're running in:
 | Codex | `pai setup codex --apply` |
 | OpenCode | `pai setup opencode --apply` |
 | OMP (oh-my-pi) | `pai setup omp --apply` |
+| Hermes Agent | `pai setup hermes --apply` |
 
 If you can't tell, ask the user which tool to set up. Without `--apply`, `pai setup` only prints the config. With it, `pai` backs up any file it changes and says where. Pass on any warning it prints, such as an `ANTHROPIC_API_KEY` that would override the setup.
 
@@ -91,5 +92,6 @@ Tell the user to quit and restart the tool so it picks up the new config:
 - **Codex:** start it with `codex --profile privacy-ai`.
 - **OpenCode:** restart it. The model is `privacy-ai/qwen3.8-27b`.
 - **OMP:** restart it and choose `privacy-ai/qwen3.8-27b` with `/model`.
+- **Hermes Agent:** restart it and choose the model with `/model custom:privacy-ai:qwen3.8-27b --global`.
 
 To disconnect later, run `pai unpair`. It removes the device from the account and deletes its key from this machine.

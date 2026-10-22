@@ -32,8 +32,9 @@ Or paste `skill/privacy-ai/SKILL.md` into your coding agent, and it does all of 
 | `pai token` | What coding tools run. Makes sure there's a credential for today, starts the local proxy if it isn't running (or is from an older `pai`), and prints the local key and nothing else. |
 | `pai proxy` | Runs the local proxy in the foreground. It only answers on 127.0.0.1, only with the local key, and refuses requests from web pages. Once a day, at a random time, it collects tomorrow's credential. |
 | `pai status` | Paired or not, account, plan, device, credentials for today and tomorrow, pins, and whether the proxy is running. Never prints secrets. |
-| `pai unpair` | Stops the proxy, removes the device from your account, then deletes its keys, credentials and config here, even if the relay can't be reached. |
-| `pai setup <claude-code\|codex\|opencode\|omp> [--apply]` | Prints the tool's config. `--apply` writes it and backs up any file it changes to `<file>.pai-backup-<time>`. |
+| `pai unpair` | Stops the proxy and removes the login service, removes the device from your account, then deletes its keys, credentials and config here, even if the relay can't be reached. |
+| `pai setup <claude-code\|codex\|opencode\|omp\|hermes> [--apply]` | Prints the tool's config. `--apply` writes it and backs up any file it changes to `<file>.pai-backup-<time>`. |
+| `pai service <install\|uninstall\|status>` | Runs the proxy whenever you're logged in, for tools that can't run `pai token` themselves. A LaunchAgent on macOS, a systemd user service on Linux. Not on Windows yet. |
 
 The relay and API default to `https://relay.privacyai.example` and `https://api.privacyai.example`. Override them at pairing with the flags or `PAI_RELAY_URL` / `PAI_API_URL`.
 
@@ -66,6 +67,7 @@ Run `pai setup <tool>` to see the exact config, with the path to `pai`, the prox
 - **Codex**: `~/.codex/config.toml` gets a `[model_providers.privacy-ai]` table using the Responses API, whose `[model_providers.privacy-ai.auth]` runs `pai token`. The model goes in a profile file, `~/.codex/privacy-ai.config.toml`, so start Codex with `codex --profile privacy-ai`.
 - **OpenCode**: the plugin in `integrations/opencode/` goes to `~/.config/opencode/plugins/privacy-ai.ts`, and `opencode.json` gets `"model": "privacy-ai/qwen3.8-27b"`. The plugin registers the provider and runs `pai token`, again after a 401.
 - **OMP**: the extension in `integrations/omp/` goes to `~/.omp/agent/extensions/privacy-ai.ts`. It registers the provider with `pai token` as its key command. Pick `privacy-ai/qwen3.8-27b` with `/model`.
+- **Hermes Agent**: `~/.hermes/config.yaml` (or `$HERMES_HOME/config.yaml`) gets a `privacy-ai` entry under `providers:`, with the local key, between a `# privacy-ai` and an `# end privacy-ai` comment. `pai` edits only those lines and leaves the rest of the file as it was. Hermes doesn't run `pai token`, so `--apply` also runs `pai service install`. Your default model stays as it is: pick Privacy AI with `/model custom:privacy-ai:qwen3.8-27b` (add `--global` to keep it), or with `hermes model`.
 
 ## Build
 

@@ -12,6 +12,7 @@ use axum::response::{IntoResponse, Response};
 use pai::app::{Clock, Env};
 use pai::config::Paths;
 use pai::keystore::Keystore;
+use pai::service::{Commands, Manager};
 use pai_proto::{
     AccountView, ApiError, ApiErrorBody, CredentialRequest, CredentialResponse, DeviceAuth,
     DeviceKind, DeviceRegistered, IssuerKeyInfo, IssuerKeyPair, IssuerKeys, PairRequest, Plan, b64,
@@ -296,8 +297,10 @@ impl TestEnv {
             clock: Clock::System,
             relay_timeout: Duration::from_secs(10),
             pai_bin: PathBuf::from("/opt/pai/bin/pai"),
-            vars: HashMap::new(),
+            vars: HashMap::from([("PAI_PROXY_PORT".to_string(), free_port().to_string())]),
             prefetch: false,
+            service_manager: Manager::current(),
+            commands: Commands::record(),
         };
         TestEnv { dir, env }
     }
@@ -305,4 +308,23 @@ impl TestEnv {
     pub fn home(&self) -> &Path {
         &self.env.paths.home
     }
+
+    /// Paired with a plain-HTTP API, without a relay: enough for anything that only reads the config.
+    pub fn with_config() -> TestEnv {
+        let t = TestEnv::new();
+        pai::config::Config {
+            relay_url: "http://127.0.0.1:9".into(),
+            api_url: "http://api.test".into(),
+            device_id: "dev_1".into(),
+            account_id: ACCOUNT_ID.into(),
+            test: None,
+        }
+        .save(&t.env.paths.config_file())
+        .unwrap();
+        t
+    }
+}
+
+pub fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }

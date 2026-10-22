@@ -14,6 +14,7 @@ use crate::config::{Config, DEFAULT_API_URL, DEFAULT_RELAY_URL, Paths, TestMode,
 use crate::error::{Error, Result, io_err};
 use crate::keystore::{CREDENTIAL, DEVICE_KEY, Keystore, NEXT_CREDENTIAL, PROXY_KEY};
 use crate::relay::Relay;
+use crate::service::{Commands, Manager};
 
 #[derive(Debug, Clone, Copy)]
 pub enum Clock {
@@ -43,6 +44,9 @@ pub struct Env {
     pub vars: HashMap<String, String>,
     /// Whether the proxy collects tomorrow's credential ahead. `PAI_PREFETCH=0` turns it off.
     pub prefetch: bool,
+    /// Which login service `pai service` installs, and how it runs launchctl or systemctl.
+    pub service_manager: Manager,
+    pub commands: Commands,
 }
 
 impl Env {
@@ -72,6 +76,8 @@ impl Env {
             pai_bin,
             vars,
             prefetch,
+            service_manager: Manager::current(),
+            commands: Commands::System,
         })
     }
 
@@ -319,7 +325,7 @@ fn local_client() -> reqwest::blocking::Client {
 
 /// What the local proxy answers at `/pai/health`: `Some(fingerprint)`, or `None` when nothing
 /// of ours is listening.
-fn proxy_health(env: &Env, key: &str) -> Option<String> {
+pub(crate) fn proxy_health(env: &Env, key: &str) -> Option<String> {
     let r = local_client()
         .get(format!("{}/pai/health", crate::proxy::url(env)))
         .bearer_auth(key)
@@ -333,6 +339,30 @@ fn stop_proxy(env: &Env, key: &str) {
     let _ = local_client().post(format!("{}/pai/stop", crate::proxy::url(env))).bearer_auth(key).send();
 }
 
+/// Stops a running proxy, if there is one, and waits until it has let go of the port.
+pub(crate) fn stop_proxy_and_wait(env: &Env, key: &str) {
+    if proxy_health(env, key).is_none() {
+        return;
+    }
+    stop_proxy(env, key);
+    for _ in 0..30 {
+        if proxy_health(env, key).is_none() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn wait_for_fingerprint(env: &Env, key: &str, want: &str) -> bool {
+    for _ in 0..50 {
+        if proxy_health(env, key).as_deref() == Some(want) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
 /// Makes sure this version of `pai`'s proxy is running with this pairing, starting it if not.
 pub fn ensure_proxy(env: &Env) -> Result<()> {
     let config = env.paired()?;
@@ -340,18 +370,14 @@ pub fn ensure_proxy(env: &Env) -> Result<()> {
     let want = crate::proxy::fingerprint(&config, &trust(env, Some(&config)));
     match proxy_health(env, &key) {
         Some(have) if have == want => return Ok(()),
-        Some(_) => {
-            stop_proxy(env, &key);
-            for _ in 0..30 {
-                if proxy_health(env, &key).is_none() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-        }
+        Some(_) => stop_proxy_and_wait(env, &key),
         None => {}
     }
     crate::proxy::upstream_client(env, &config)?;
+    // With the login service installed, let it own the proxy, so the two don't fight over the port.
+    if crate::service::restart(env) && wait_for_fingerprint(env, &key, &want) {
+        return Ok(());
+    }
 
     let mut cmd = std::process::Command::new(&env.pai_bin);
     cmd.arg("proxy")
@@ -372,11 +398,8 @@ pub fn ensure_proxy(env: &Env) -> Result<()> {
         cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
     cmd.spawn().map_err(|e| Error::Io(format!("couldn't start pai's local proxy: {e}")))?;
-    for _ in 0..50 {
-        if proxy_health(env, &key).as_deref() == Some(want.as_str()) {
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(100));
+    if wait_for_fingerprint(env, &key, &want) {
+        return Ok(());
     }
     Err(Error::Io(format!(
         "pai's local proxy didn't start on 127.0.0.1:{}. Run `pai proxy` to see why, or set PAI_PROXY_PORT if that port is taken",
@@ -501,6 +524,7 @@ pub struct Status {
     pub credential_today: bool,
     pub credential_tomorrow: bool,
     pub proxy: String,
+    pub service: String,
     pub trust: Trust,
     pub keystore: String,
 }
@@ -515,6 +539,7 @@ pub fn status(env: &Env) -> Result<Status> {
             credential_today: false,
             credential_tomorrow: false,
             proxy: "-".into(),
+            service: crate::service::describe(env),
             trust: trust(env, None),
             keystore,
         });
@@ -548,6 +573,7 @@ pub fn status(env: &Env) -> Result<Status> {
             Some(_) => format!("running at {}", crate::proxy::url(env)),
             None => format!("not running (coding tools start it with `pai token`); {}", crate::proxy::url(env)),
         },
+        service: crate::service::describe(env),
         trust: trust(env, Some(&cfg)),
         keystore,
     })
@@ -585,6 +611,7 @@ impl std::fmt::Display for Status {
             writeln!(f, "Pins:       {} for the API's key", self.trust.api_pins.len())?;
         }
         writeln!(f, "Proxy:      {}", self.proxy)?;
+        writeln!(f, "Service:    {}", self.service)?;
         writeln!(f, "Keystore:   {}", self.keystore)
     }
 }
@@ -618,6 +645,13 @@ pub fn unpair(env: &Env) -> Result<Vec<String>> {
             }
         }
         _ => notes.push("The pairing was incomplete; removing what's left of it.".into()),
+    }
+    // Before stopping the proxy, or the service would start it again.
+    if crate::service::installed(env) {
+        match crate::service::uninstall(env) {
+            Ok(lines) => notes.extend(lines),
+            Err(e) => notes.push(format!("Couldn't remove the login service ({e}). Run `pai service uninstall`.")),
+        }
     }
     if let Ok(Some(k)) = env.keystore.get(PROXY_KEY) {
         stop_proxy(env, &k);
