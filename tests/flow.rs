@@ -16,7 +16,7 @@ fn paired(relay: &FakeRelay) -> TestEnv {
         Some(&relay.url),
         Some("http://api.test/"),
         Some("test box"),
-        &[],
+        None,
     )
     .unwrap();
     t
@@ -230,18 +230,18 @@ fn pairing_errors() {
     let relay = FakeRelay::start(CODE);
     let t = TestEnv::new();
     assert!(matches!(
-        app::pair(&t.env, "short", Some(&relay.url), None, None, &[]),
+        app::pair(&t.env, "short", Some(&relay.url), None, None, None),
         Err(Error::BadPairingCode)
     ));
-    let err = app::pair(&t.env, "ZZZZ-ZZZZ", Some(&relay.url), None, None, &[]).unwrap_err();
+    let err = app::pair(&t.env, "ZZZZ-ZZZZ", Some(&relay.url), None, None, None).unwrap_err();
     assert!(matches!(err, Error::PairingRejected(_)), "{err:?}");
     assert!(t.env.config().unwrap().is_none());
     assert!(t.env.keystore.get(DEVICE_KEY).unwrap().is_none());
 
-    app::pair(&t.env, CODE, Some(&relay.url), None, None, &[]).unwrap();
+    app::pair(&t.env, CODE, Some(&relay.url), None, None, None).unwrap();
     relay.add_code("ZZZZ0000");
     assert!(matches!(
-        app::pair(&t.env, "ZZZZ0000", Some(&relay.url), None, None, &[]),
+        app::pair(&t.env, "ZZZZ0000", Some(&relay.url), None, None, None),
         Err(Error::AlreadyPaired)
     ));
 }

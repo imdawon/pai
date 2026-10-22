@@ -28,7 +28,7 @@ Or paste `skill/privacy-ai/SKILL.md` into your coding agent, and it does all of 
 
 | Command | Does |
 |---|---|
-| `pai pair <code> [--relay URL] [--api URL] [--name NAME] [--pin PIN]` | Links this machine using the 8-character code from **Connect a device** in the web app. Makes an Ed25519 device key and keeps it in the OS keychain. |
+| `pai pair <code> [--relay URL] [--api URL] [--name NAME]` | Links this machine using the 8-character code from **Connect a device** in the web app. Makes an Ed25519 device key and keeps it in the OS keychain. |
 | `pai token` | What coding tools run. Makes sure there's a credential for today, starts the local proxy if it isn't running (or is from an older `pai`), and prints the local key and nothing else. |
 | `pai proxy` | Runs the local proxy in the foreground. It only answers on 127.0.0.1, only with the local key, and refuses requests from web pages. Once a day, at a random time, it collects tomorrow's credential. |
 | `pai status` | Paired or not, account, plan, device, credentials for today and tomorrow, pins, and whether the proxy is running. Never prints secrets. |
@@ -40,11 +40,9 @@ The relay and API default to `https://relay.privacyai.example` and `https://api.
 | Variable | Does |
 |---|---|
 | `PAI_PROXY_PORT` | The proxy's port, `47821` by default. Run `pai setup` again after changing it. |
-| `PAI_API_PINS` | Comma-separated pins for the model API's key, replacing the ones built in. For a test box only. |
-| `PAI_API_CA` | A PEM file trusted instead of the public certificate authorities, for a test box with its own certificate. Pins still apply. |
 | `PAI_PREFETCH=0` | Stops the proxy collecting tomorrow's credential ahead. |
 
-A pin is the base64 SHA-256 of the server's public key: `openssl x509 -pubkey -noout -in cert.pem | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | base64`. Releases are built with the box's pins (`PAI_RELEASE_API_PINS` in `release/build.sh`), including a spare key for when the box's key changes. An `http://` API URL, for a local test gateway, skips TLS and pins.
+Each release carries the pins for the model API's key, plus a spare for when the box's key changes. Building or testing `pai` against a staging service is covered in `docs/TESTING.md`.
 
 Errors go to stderr. `pai token` exits with 2 when not paired, 3 when the plan isn't paid, 4 when the device was removed, and 5 when the relay is unreachable.
 
@@ -53,7 +51,7 @@ Errors go to stderr. `pai token` exits with 2 when not paired, 3 when the plan i
 | What | Where |
 |---|---|
 | Device key, today's and tomorrow's credentials, the local proxy key | OS keychain, service `privacy-ai`: macOS Keychain, Windows Credential Manager, or the Secret Service on Linux |
-| Relay URL, API URL, device ID, account ID, any test pins | `pai/config.json` in the OS config directory (`~/Library/Application Support`, `%APPDATA%`, `~/.config`) |
+| Relay URL, API URL, device ID, account ID | `pai/config.json` in the OS config directory (`~/Library/Application Support`, `%APPDATA%`, `~/.config`) |
 | Lock that stops parallel `pai token` calls fetching twice | `pai/token.lock` next to the config |
 
 On a headless Linux machine without a Secret Service, `pai` stops with an error. Set `PAI_KEYSTORE=file` to keep the secrets in `~/.config/pai/secrets.json` instead, with mode 0600 and no encryption. `PAI_CONFIG_DIR` moves all of these files to one directory.

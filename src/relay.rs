@@ -53,17 +53,19 @@ impl Reply {
 }
 
 impl Relay {
-    pub fn new(base: &str, timeout: Duration) -> Relay {
+    /// `test_ca`, in test mode, is trusted instead of the public certificate authorities.
+    pub fn new(base: &str, timeout: Duration, test_ca: Option<&std::path::Path>) -> Result<Relay> {
         let client = Client::builder()
             .timeout(timeout)
             .connect_timeout(timeout.min(Duration::from_secs(10)))
             .user_agent(concat!("pai/", env!("CARGO_PKG_VERSION")))
+            .use_preconfigured_tls(crate::pin::relay_config(test_ca)?)
             .build()
-            .expect("HTTP client builds");
-        Relay {
+            .map_err(|e| Error::Setup(format!("couldn't set up the connection to the relay: {e}")))?;
+        Ok(Relay {
             base: crate::config::trim_url(base),
             client,
-        }
+        })
     }
 
     fn exchange_once(

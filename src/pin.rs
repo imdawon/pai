@@ -71,32 +71,44 @@ impl ServerCertVerifier for PinnedVerifier {
     }
 }
 
-/// TLS settings for the model API: the usual certificate checks, plus the pins. `extra_ca` is a
-/// PEM file trusted instead of the public roots, for a test box with its own CA.
-pub fn client_config(pins: &[String], extra_ca: Option<&std::path::Path>) -> Result<rustls::ClientConfig> {
-    if pins.is_empty() {
-        return Err(Error::Setup(
-            "pai has no pins for the model API, so it can't check it's talking to the real one. \
-             This build of pai is incomplete; install a release, or set PAI_API_PINS for a test box"
-                .into(),
-        ));
-    }
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
+fn roots(test_ca: Option<&std::path::Path>) -> Result<rustls::RootCertStore> {
     let mut roots = rustls::RootCertStore::empty();
-    match extra_ca {
+    match test_ca {
         Some(path) => {
-            for cert in CertificateDer::pem_file_iter(path)
-                .map_err(|e| Error::Setup(format!("couldn't read PAI_API_CA {}: {e}", path.display())))?
-            {
-                let cert = cert.map_err(|e| Error::Setup(format!("PAI_API_CA {} isn't valid PEM: {e}", path.display())))?;
-                roots
-                    .add(cert)
-                    .map_err(|e| Error::Setup(format!("PAI_API_CA {} has a certificate rustls can't use: {e}", path.display())))?;
+            let bad = |what: String| Error::Setup(format!("the test CA {} {what}", path.display()));
+            for cert in CertificateDer::pem_file_iter(path).map_err(|e| bad(format!("couldn't be read: {e}")))? {
+                let cert = cert.map_err(|e| bad(format!("isn't valid PEM: {e}")))?;
+                roots.add(cert).map_err(|e| bad(format!("has a certificate rustls can't use: {e}")))?;
             }
         }
         None => roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()),
     }
-    let inner = WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider.clone())
+    Ok(roots)
+}
+
+/// TLS settings for the relay: the public certificate authorities, or only the test CA in test
+/// mode. The relay isn't pinned: it only ever sees blinded requests and encrypted chats.
+pub fn relay_config(test_ca: Option<&std::path::Path>) -> Result<rustls::ClientConfig> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    Ok(rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| Error::Setup(format!("couldn't set up TLS: {e}")))?
+        .with_root_certificates(roots(test_ca)?)
+        .with_no_client_auth())
+}
+
+/// TLS settings for the model API: the usual certificate checks, plus the pins. In test mode
+/// `test_ca` is trusted instead of the public certificate authorities.
+pub fn client_config(pins: &[String], test_ca: Option<&std::path::Path>) -> Result<rustls::ClientConfig> {
+    if pins.is_empty() {
+        return Err(Error::Setup(
+            "pai has no pins for the model API, so it can't check it's talking to the real one. \
+             This build of pai is incomplete; install a release"
+                .into(),
+        ));
+    }
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let inner = WebPkiServerVerifier::builder_with_provider(Arc::new(roots(test_ca)?), provider.clone())
         .build()
         .map_err(|e| Error::Setup(format!("couldn't set up certificate checks: {e}")))?;
     let verifier = Arc::new(PinnedVerifier { inner, pins: pins.to_vec() });

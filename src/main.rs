@@ -29,9 +29,11 @@ enum Command {
         /// Name shown in the web app's device list [default: pai on <hostname>]
         #[arg(long)]
         name: Option<String>,
-        /// Pin for a test box's API key (base64 SHA-256 of its public key). Releases carry their own
-        #[arg(long = "pin")]
-        pins: Vec<String>,
+        // Test mode, for staging only (docs/TESTING.md). Hidden from --help on purpose.
+        #[arg(long = "test-ca", hide = true, requires = "test_pins")]
+        test_ca: Option<std::path::PathBuf>,
+        #[arg(long = "test-pin", hide = true, requires = "test_ca")]
+        test_pins: Vec<String>,
     },
     /// Start the local proxy if needed and print this machine's key for it. Coding tools run this.
     Token,
@@ -65,13 +67,18 @@ fn main() -> ExitCode {
 
 fn run(command: Command) -> Result<(), Error> {
     let env = Env::from_process()?;
+    let config = env.config().ok().flatten();
+    if let Some(warning) = app::test_mode_warning(&app::trust(&env, config.as_ref())) {
+        eprintln!("{warning}");
+    }
     match command {
         Command::Pair {
             code,
             relay,
             api,
             name,
-            pins,
+            test_ca,
+            test_pins,
         } => {
             let cfg = app::pair(
                 &env,
@@ -79,12 +86,15 @@ fn run(command: Command) -> Result<(), Error> {
                 relay.as_deref(),
                 api.as_deref(),
                 name.as_deref(),
-                &pins,
+                test_ca.as_deref().map(|ca| (ca, test_pins.as_slice())),
             )?;
             println!(
                 "Paired. Account {}, device {}.",
                 cfg.account_id, cfg.device_id
             );
+            if let Some(warning) = app::test_mode_warning(&app::trust(&env, Some(&cfg))) {
+                eprintln!("{warning}");
+            }
             println!("Next: `pai setup <claude-code|codex|opencode|omp> --apply`.");
         }
         Command::Token => {

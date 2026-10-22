@@ -15,8 +15,16 @@ pub struct Config {
     pub api_url: String,
     pub device_id: String,
     pub account_id: String,
-    /// Pins for the model API's key, for a test box. Releases carry their own.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Test mode, for staging only: see docs/TESTING.md. Absent for real use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test: Option<TestMode>,
+}
+
+/// A test CA trusted instead of the public certificate authorities, for the relay and the API,
+/// and pins that replace the release's. It never turns pin checking off.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TestMode {
+    pub ca: PathBuf,
     pub api_pins: Vec<String>,
 }
 
@@ -62,6 +70,11 @@ pub struct Paths {
 impl Paths {
     pub fn config_file(&self) -> PathBuf {
         self.config_dir.join("config.json")
+    }
+
+    /// Where `pai pair --test-ca` keeps its copy of the test CA.
+    pub fn test_ca_file(&self) -> PathBuf {
+        self.config_dir.join("test-ca.pem")
     }
 
     pub fn lock_file(&self) -> PathBuf {

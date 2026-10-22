@@ -10,7 +10,7 @@ use pai_proto::{
 };
 use zeroize::Zeroizing;
 
-use crate::config::{Config, DEFAULT_API_URL, DEFAULT_RELAY_URL, Paths, trim_url};
+use crate::config::{Config, DEFAULT_API_URL, DEFAULT_RELAY_URL, Paths, TestMode, trim_url};
 use crate::error::{Error, Result, io_err};
 use crate::keystore::{CREDENTIAL, DEVICE_KEY, Keystore, NEXT_CREDENTIAL, PROXY_KEY};
 use crate::relay::Relay;
@@ -150,7 +150,7 @@ pub fn pair(
     relay_url: Option<&str>,
     api_url: Option<&str>,
     name: Option<&str>,
-    api_pins: &[String],
+    test: Option<(&std::path::Path, &[String])>,
 ) -> Result<Config> {
     let code = normalize_code(code)?;
     if env.config()?.is_some() {
@@ -166,7 +166,20 @@ pub fn pair(
     let api_url = api_url
         .map(trim_url)
         .unwrap_or_else(|| env.default_api_url());
-    let relay = Relay::new(&relay_url, env.relay_timeout);
+    let test = match test {
+        None => None,
+        Some((ca, pins)) => {
+            if pins.is_empty() {
+                return Err(Error::Setup("test mode needs the API's pins as well as the test CA".into()));
+            }
+            let pem = fs::read(ca).map_err(|e| io_err("read", ca, e))?;
+            fs::create_dir_all(&env.paths.config_dir).map_err(|e| io_err("create", &env.paths.config_dir, e))?;
+            let copy = env.paths.test_ca_file();
+            fs::write(&copy, pem).map_err(|e| io_err("write", &copy, e))?;
+            Some(TestMode { ca: copy, api_pins: pins.to_vec() })
+        }
+    };
+    let relay = Relay::new(&relay_url, env.relay_timeout, test.as_ref().map(|t| t.ca.as_path()))?;
 
     let key = SigningKey::generate(&mut rand::rngs::OsRng);
     let request = PairRequest {
@@ -184,7 +197,7 @@ pub fn pair(
         api_url,
         device_id: registered.device_id.clone(),
         account_id: registered.account_id,
-        api_pins: api_pins.to_vec(),
+        test,
     };
     let saved = (|| {
         let seed = Zeroizing::new(b64(key.to_bytes()));
@@ -240,17 +253,48 @@ pub fn credential(env: &Env, refresh: bool) -> Result<String> {
     current_credential(env, &config, today, refresh)
 }
 
-/// Pins for the model API's key: `PAI_API_PINS` (comma-separated), then the pairing's, then the
-/// ones this release was built with.
-pub fn api_pins(env: &Env, config: &Config) -> Vec<String> {
+/// Which certificates `pai` trusts. Normally the public certificate authorities and the pins this
+/// release was built with. Test mode (docs/TESTING.md) swaps in a test CA and test pins, from the
+/// pairing or from `PAI_TEST_CA` and `PAI_TEST_API_PINS`; it never turns pin checking off.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Trust {
+    pub test_ca: Option<PathBuf>,
+    pub api_pins: Vec<String>,
+}
+
+impl Trust {
+    pub fn is_test(&self) -> bool {
+        self.test_ca.is_some()
+    }
+}
+
+pub fn trust(env: &Env, config: Option<&Config>) -> Trust {
     let list = |s: &str| s.split(',').map(str::trim).filter(|p| !p.is_empty()).map(str::to_string).collect::<Vec<_>>();
-    if let Some(v) = env.var("PAI_API_PINS") {
-        return list(v);
+    let test = config.and_then(|c| c.test.as_ref());
+    let test_ca = env.var("PAI_TEST_CA").map(PathBuf::from).or_else(|| test.map(|t| t.ca.clone()));
+    let api_pins = match (env.var("PAI_TEST_API_PINS"), test) {
+        (Some(v), _) if test_ca.is_some() => list(v),
+        (_, Some(t)) if test_ca.is_some() => t.api_pins.clone(),
+        _ => list(option_env!("PAI_RELEASE_API_PINS").unwrap_or("")),
+    };
+    Trust { test_ca, api_pins }
+}
+
+/// Printed on stderr by every command while test mode is on.
+pub fn test_mode_warning(t: &Trust) -> Option<String> {
+    t.test_ca.as_ref().map(|ca| {
+        format!(
+            "pai: TEST MODE: trusting only {} and test pins, instead of the real service's. \
+             If you didn't set this up yourself for testing, run `pai unpair` and pair again",
+            ca.display()
+        )
+    })
+}
+
+impl Env {
+    fn relay(&self, config: &Config, timeout: Duration) -> Result<Relay> {
+        Relay::new(&config.relay_url, timeout, trust(self, Some(config)).test_ca.as_deref())
     }
-    if !config.api_pins.is_empty() {
-        return config.api_pins.clone();
-    }
-    list(option_env!("PAI_RELEASE_API_PINS").unwrap_or(""))
 }
 
 /// This machine's key for the local proxy, made on first use.
@@ -293,7 +337,7 @@ fn stop_proxy(env: &Env, key: &str) {
 pub fn ensure_proxy(env: &Env) -> Result<()> {
     let config = env.paired()?;
     let key = local_key(env)?;
-    let want = crate::proxy::fingerprint(&config, &api_pins(env, &config));
+    let want = crate::proxy::fingerprint(&config, &trust(env, Some(&config)));
     match proxy_health(env, &key) {
         Some(have) if have == want => return Ok(()),
         Some(_) => {
@@ -372,7 +416,7 @@ fn current_credential(env: &Env, config: &Config, today: u32, refresh: bool) -> 
 /// Asks the relay for a blind-signed credential for `day`, which is today or tomorrow.
 fn fetch_credential(env: &Env, config: &Config, day: u32) -> Result<String> {
     let key = env.device_key()?;
-    let relay = Relay::new(&config.relay_url, env.relay_timeout);
+    let relay = env.relay(config, env.relay_timeout)?;
     let account = relay.account(&key, &config.device_id)?;
     if account.status == "banned" {
         return Err(Error::Banned);
@@ -457,7 +501,7 @@ pub struct Status {
     pub credential_today: bool,
     pub credential_tomorrow: bool,
     pub proxy: String,
-    pub pins: usize,
+    pub trust: Trust,
     pub keystore: String,
 }
 
@@ -471,7 +515,7 @@ pub fn status(env: &Env) -> Result<Status> {
             credential_today: false,
             credential_tomorrow: false,
             proxy: "-".into(),
-            pins: 0,
+            trust: trust(env, None),
             keystore,
         });
     };
@@ -481,11 +525,9 @@ pub fn status(env: &Env) -> Result<Status> {
     let credential_tomorrow = stored_credential(env, NEXT_CREDENTIAL, today + 1).ok().flatten().is_some();
     let plan = match env.device_key() {
         Err(e) => format!("unknown ({e})"),
-        Ok(key) => match Relay::new(
-            &cfg.relay_url,
-            env.relay_timeout.min(Duration::from_secs(10)),
-        )
-        .account(&key, &cfg.device_id)
+        Ok(key) => match env
+            .relay(&cfg, env.relay_timeout.min(Duration::from_secs(10)))
+            .and_then(|r| r.account(&key, &cfg.device_id))
         {
             Ok(a) => match (&a.plan, a.credential_plan) {
                 (Some(p), Some(_)) => format!("{p} ({})", a.status),
@@ -506,7 +548,7 @@ pub fn status(env: &Env) -> Result<Status> {
             Some(_) => format!("running at {}", crate::proxy::url(env)),
             None => format!("not running (coding tools start it with `pai token`); {}", crate::proxy::url(env)),
         },
-        pins: api_pins(env, &cfg).len(),
+        trust: trust(env, Some(&cfg)),
         keystore,
     })
 }
@@ -533,10 +575,14 @@ impl std::fmt::Display for Status {
         )?;
         writeln!(f, "Relay:      {}", c.relay_url)?;
         writeln!(f, "API:        {}", c.api_url)?;
-        if c.api_url.starts_with("https://") {
-            writeln!(f, "Pins:       {}", if self.pins == 0 { "none, so the proxy won't connect".to_string() } else { format!("{} for the API's key", self.pins) })?;
-        } else {
+        if let Some(ca) = &self.trust.test_ca {
+            writeln!(f, "TEST MODE:  trusting only {} and {} test pin(s). Not for real use", ca.display(), self.trust.api_pins.len())?;
+        } else if !c.api_url.starts_with("https://") {
             writeln!(f, "Pins:       none needed (plain HTTP test gateway; nothing is encrypted)")?;
+        } else if self.trust.api_pins.is_empty() {
+            writeln!(f, "Pins:       none, so the proxy won't connect")?;
+        } else {
+            writeln!(f, "Pins:       {} for the API's key", self.trust.api_pins.len())?;
         }
         writeln!(f, "Proxy:      {}", self.proxy)?;
         writeln!(f, "Keystore:   {}", self.keystore)
@@ -555,8 +601,9 @@ pub fn unpair(env: &Env) -> Result<Vec<String>> {
         Err(_) => None,
     };
     match (&config, &key) {
-        (Some(cfg), Some(key)) => match Relay::new(&cfg.relay_url, env.relay_timeout.min(Duration::from_secs(15)))
-            .delete_self(key, &cfg.device_id)
+        (Some(cfg), Some(key)) => match env
+            .relay(cfg, env.relay_timeout.min(Duration::from_secs(15)))
+            .and_then(|r| r.delete_self(key, &cfg.device_id))
         {
             Ok(true) => notes.push("Removed this device from your account.".into()),
             Ok(false) => notes.push("The relay had already removed this device.".into()),
@@ -579,7 +626,7 @@ pub fn unpair(env: &Env) -> Result<Vec<String>> {
     env.keystore.delete(CREDENTIAL)?;
     env.keystore.delete(NEXT_CREDENTIAL)?;
     env.keystore.delete(PROXY_KEY)?;
-    for path in [env.paths.config_file(), env.paths.lock_file()] {
+    for path in [env.paths.config_file(), env.paths.lock_file(), env.paths.test_ca_file()] {
         match fs::remove_file(&path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -596,8 +643,5 @@ pub fn unpair(env: &Env) -> Result<Vec<String>> {
 pub fn plan_hint(env: &Env) -> Option<Plan> {
     let cfg = env.config().ok()??;
     let key = env.device_key().ok()?;
-    Relay::new(&cfg.relay_url, Duration::from_secs(5))
-        .account(&key, &cfg.device_id)
-        .ok()?
-        .credential_plan
+    env.relay(&cfg, Duration::from_secs(5)).ok()?.account(&key, &cfg.device_id).ok()?.credential_plan
 }

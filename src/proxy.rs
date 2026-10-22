@@ -35,7 +35,7 @@ pub fn url(env: &Env) -> String {
 
 /// What a running proxy reports at `/pai/health`, so `pai token` can tell whether it was started
 /// by this version of `pai` with this pairing, or needs replacing.
-pub fn fingerprint(config: &Config, pins: &[String]) -> String {
+pub fn fingerprint(config: &Config, trust: &app::Trust) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(env!("CARGO_PKG_VERSION"));
@@ -47,9 +47,13 @@ pub fn fingerprint(config: &Config, pins: &[String]) -> String {
         h.update([0]);
         h.update(part);
     }
-    for p in pins {
+    for p in &trust.api_pins {
         h.update([1]);
         h.update(p);
+    }
+    if let Some(ca) = &trust.test_ca {
+        h.update([2]);
+        h.update(ca.to_string_lossy().as_bytes());
     }
     pai_proto::hex(h.finalize())
 }
@@ -60,8 +64,8 @@ pub fn upstream_client(env: &Env, config: &Config) -> Result<reqwest::Client> {
         .connect_timeout(Duration::from_secs(15))
         .user_agent(concat!("pai/", env!("CARGO_PKG_VERSION")));
     let builder = if config.api_url.starts_with("https://") {
-        let ca = env.var("PAI_API_CA").map(std::path::PathBuf::from);
-        builder.use_preconfigured_tls(pin::client_config(&app::api_pins(env, config), ca.as_deref())?)
+        let trust = app::trust(env, Some(config));
+        builder.use_preconfigured_tls(pin::client_config(&trust.api_pins, trust.test_ca.as_deref())?)
     } else if config.api_url.starts_with("http://") {
         builder
     } else {
@@ -85,7 +89,7 @@ struct Proxy {
 pub fn run(env: Env) -> Result<()> {
     let config = env.config()?.ok_or(Error::NotPaired)?;
     let local_key = app::local_key(&env)?;
-    let fingerprint = fingerprint(&config, &app::api_pins(&env, &config));
+    let fingerprint = fingerprint(&config, &app::trust(&env, Some(&config)));
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(2)

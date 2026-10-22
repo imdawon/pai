@@ -116,12 +116,12 @@ fn start(api_port: u16, ca_pem: &str, pin: &str) -> (Running, FakeRelay) {
     let relay = FakeRelay::start(CODE);
     let mut t = TestEnv::new();
     let api = format!("https://localhost:{api_port}");
-    app::pair(&t.env, CODE, Some(&relay.url), Some(&api), None, &[pin.to_string()]).unwrap();
     let ca = t.dir.path().join("ca.pem");
     std::fs::write(&ca, ca_pem).unwrap();
+    let pins = [pin.to_string()];
+    app::pair(&t.env, CODE, Some(&relay.url), Some(&api), None, Some((ca.as_path(), &pins[..]))).unwrap();
     let port = free_port();
     t.env.vars.insert("PAI_PROXY_PORT".into(), port.to_string());
-    t.env.vars.insert("PAI_API_CA".into(), ca.to_string_lossy().into_owned());
     let key = app::local_key(&t.env).unwrap();
     let env = t.env.clone();
     std::thread::spawn(move || pai::proxy::run(env));
@@ -190,4 +190,37 @@ fn replaces_a_rejected_credential_once() {
     assert_eq!(s.requests.len(), 2);
     assert_ne!(s.requests[0].1, s.requests[1].1, "a fresh credential on the retry");
     assert_eq!(relay.issued(), 2);
+}
+
+#[test]
+fn test_mode_is_on_only_when_paired_with_it_and_says_so() {
+    let relay = FakeRelay::start(CODE);
+    let t = TestEnv::new();
+    app::pair(&t.env, CODE, Some(&relay.url), None, None, None).unwrap();
+    let cfg = t.env.config().unwrap().unwrap();
+    let normal = app::trust(&t.env, Some(&cfg));
+    assert!(!normal.is_test());
+    assert!(app::test_mode_warning(&normal).is_none());
+    assert!(!app::status(&t.env).unwrap().to_string().contains("TEST MODE"));
+
+    // The environment variables alone need a CA too: pins alone don't change anything.
+    let mut e = t.env.clone();
+    e.vars.insert("PAI_TEST_API_PINS".into(), "AAAA".into());
+    assert_eq!(app::trust(&e, Some(&cfg)), normal);
+    e.vars.insert("PAI_TEST_CA".into(), "/tmp/ca.pem".into());
+    let test = app::trust(&e, Some(&cfg));
+    assert!(test.is_test());
+    assert_eq!(test.api_pins, vec!["AAAA".to_string()]);
+    assert!(app::test_mode_warning(&test).unwrap().contains("TEST MODE"));
+    assert!(app::status(&e).unwrap().to_string().contains("TEST MODE"));
+}
+
+#[test]
+fn test_mode_needs_pins() {
+    let relay = FakeRelay::start(CODE);
+    let t = TestEnv::new();
+    let ca = t.dir.path().join("ca.pem");
+    std::fs::write(&ca, "x").unwrap();
+    let err = app::pair(&t.env, CODE, Some(&relay.url), None, None, Some((ca.as_path(), &[]))).unwrap_err();
+    assert!(err.to_string().contains("pins"), "{err}");
 }

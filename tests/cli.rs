@@ -48,6 +48,9 @@ fn binary_end_to_end() {
             .is_ok_and(|r| r.status() == 200)
     };
 
+    let help = text(&cli.run(&["pair", "--help"]).stdout);
+    assert!(help.contains("--relay") && !help.contains("test"), "test mode stays out of --help: {help}");
+
     let out = cli.run(&["token"]);
     assert_eq!(out.status.code(), Some(2));
     assert!(out.stdout.is_empty());
