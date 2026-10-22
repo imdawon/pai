@@ -7,7 +7,7 @@ use pai::error::Error;
 use pai::service;
 use pai::setup::{self, Tool};
 
-/// Connects coding tools to Privacy AI through a local proxy, so they never hold a credential.
+/// Connects coding tools to DawonAI through a local proxy, so they never hold a credential.
 #[derive(Parser)]
 #[command(name = "pai", version)]
 struct Cli {
@@ -50,7 +50,7 @@ enum Command {
         #[command(subcommand)]
         action: ServiceAction,
     },
-    /// Print the config a coding tool needs, or write it with --apply
+    /// Print the config a coding tool needs and where the DawonAI skill goes, or write both with --apply
     Setup {
         #[arg(value_enum)]
         tool: Tool,

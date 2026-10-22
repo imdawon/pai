@@ -2,7 +2,7 @@
 name = "pai"
 version = "0.1.0"
 edition = "2024"
-description = "Gives coding tools a Privacy AI day credential without a long-lived API key"
+description = "Gives coding tools a DawonAI day credential without a long-lived API key"
 license = "MIT"
 
 [dependencies]

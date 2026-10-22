@@ -1,7 +1,7 @@
 {
-  "name": "opencode-privacy-ai",
+  "name": "opencode-dawonai",
   "version": "0.1.0",
-  "description": "OpenCode plugin for Privacy AI: registers the privacy-ai provider and authenticates with `pai token`",
+  "description": "OpenCode plugin for DawonAI: registers the dawonai provider and authenticates with `pai token`",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -22,7 +22,7 @@
   "keywords": [
     "opencode",
     "opencode-plugin",
-    "privacy-ai"
+    "dawonai"
   ],
   "scripts": {
     "build": "tsc",

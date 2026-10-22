@@ -46,7 +46,7 @@ impl fmt::Display for Error {
         match self {
             Error::NotPaired => write!(
                 f,
-                "not paired: open Connect a device in the Privacy AI web app, then run `pai pair <code>`"
+                "not paired: open Connect a device in the DawonAI web app, then run `pai pair <code>`"
             ),
             Error::AlreadyPaired => {
                 write!(
@@ -65,7 +65,7 @@ impl fmt::Display for Error {
             ),
             Error::NotPaid { detail } => write!(
                 f,
-                "plan not paid ({}): choose a plan in the Privacy AI web app, then try again",
+                "plan not paid ({}): choose a plan in the DawonAI web app, then try again",
                 clause(detail)
             ),
             Error::Banned => write!(f, "this account is suspended and can't get new credentials"),

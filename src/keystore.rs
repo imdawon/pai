@@ -7,7 +7,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::{Error, Result, io_err};
 
-pub const SERVICE: &str = "privacy-ai";
+pub const SERVICE: &str = "dawonai";
 pub const DEVICE_KEY: &str = "device-key";
 pub const CREDENTIAL: &str = "day-credential";
 /// Tomorrow's credential, collected ahead at a random time.

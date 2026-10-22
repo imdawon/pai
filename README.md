@@ -1,6 +1,6 @@
 # pai
 
-Lets coding tools use Privacy AI without holding any credential. Each tool talks to `pai`'s local proxy at `http://127.0.0.1:47821`, with a key that only works on this machine. The proxy adds a day credential, which expires at UTC midnight and can't be linked to your account, and sends the request to the model API. `pai` runs on macOS, Windows and Linux.
+Lets coding tools use DawonAI without holding any credential. Each tool talks to `pai`'s local proxy at `http://127.0.0.1:47821`, with a key that only works on this machine. The proxy adds a day credential, which expires at UTC midnight and can't be linked to your account through the credential itself, and sends the request to the model API. `pai` runs on macOS, Windows and Linux.
 
 **Why a proxy.** The relay that carries your connection holds the IP address the model API's name points to, so it could get a valid certificate for that name and read what your tool sends. The proxy checks the model API's public key against pins built into `pai`, and refuses to connect to anything else, whatever certificate it shows. Coding tools can't do that check themselves.
 
@@ -22,7 +22,7 @@ irm https://privacyai.example/pai/install.ps1 -OutFile $env:TEMP\pai-install.ps1
 
 Both download the binary for your OS and CPU, check it against `SHA256SUMS`, and install to `~/.local/bin` or `%LOCALAPPDATA%\pai`. `PAI_DOWNLOAD_BASE` changes where they download from, and `PAI_INSTALL_DIR` where they install.
 
-Or paste `skill/privacy-ai/SKILL.md` into your coding agent, and it does all of this for you.
+Or paste `skill/dawonai/SKILL.md` into your coding agent, and it does all of this for you.
 
 ## Commands
 
@@ -33,7 +33,7 @@ Or paste `skill/privacy-ai/SKILL.md` into your coding agent, and it does all of 
 | `pai proxy` | Runs the local proxy in the foreground. It only answers on 127.0.0.1, only with the local key, and refuses requests from web pages. Once a day, at a random time, it collects tomorrow's credential. |
 | `pai status` | Paired or not, account, plan, device, credentials for today and tomorrow, pins, and whether the proxy is running. Never prints secrets. |
 | `pai unpair` | Stops the proxy and removes the login service, removes the device from your account, then deletes its keys, credentials and config here, even if the relay can't be reached. |
-| `pai setup <claude-code\|codex\|opencode\|omp\|hermes> [--apply]` | Prints the tool's config. `--apply` writes it and backs up any file it changes to `<file>.pai-backup-<time>`. |
+| `pai setup <claude-code\|codex\|opencode\|omp\|hermes> [--apply]` | Prints the tool's config and where the DawonAI skill goes. `--apply` writes both and backs up any file it changes to `<file>.pai-backup-<time>`. |
 | `pai service <install\|uninstall\|status>` | Runs the proxy whenever you're logged in, for tools that can't run `pai token` themselves. A LaunchAgent on macOS, a systemd user service on Linux. Not on Windows yet. |
 
 The relay and API default to `https://relay.privacyai.example` and `https://api.privacyai.example`. Override them at pairing with the flags or `PAI_RELAY_URL` / `PAI_API_URL`.
@@ -51,7 +51,7 @@ Errors go to stderr. `pai token` exits with 2 when not paired, 3 when the plan i
 
 | What | Where |
 |---|---|
-| Device key, today's and tomorrow's credentials, the local proxy key | OS keychain, service `privacy-ai`: macOS Keychain, Windows Credential Manager, or the Secret Service on Linux |
+| Device key, today's and tomorrow's credentials, the local proxy key | OS keychain, service `dawonai`: macOS Keychain, Windows Credential Manager, or the Secret Service on Linux |
 | Relay URL, API URL, device ID, account ID | `pai/config.json` in the OS config directory (`~/Library/Application Support`, `%APPDATA%`, `~/.config`) |
 | Lock that stops parallel `pai token` calls fetching twice | `pai/token.lock` next to the config |
 
@@ -63,11 +63,21 @@ On a headless Linux machine without a Secret Service, `pai` stops with an error.
 
 Run `pai setup <tool>` to see the exact config, with the path to `pai`, the proxy's address and your plan's context window filled in. `--apply` writes it. Every tool talks to the proxy, never to the model API directly.
 
+`--apply` also installs the DawonAI skill, `skill/dawonai/SKILL.md`, as a personal skill named `dawonai`. It tells the tool's agent how `pai` works and how to fix problems with it. Running `pai setup` again replaces it, after a backup. `pai unpair` leaves it in place.
+
+| Tool | Skill file |
+|---|---|
+| Claude Code | `~/.claude/skills/dawonai/SKILL.md`, or under `$CLAUDE_CONFIG_DIR` |
+| Codex | `~/.agents/skills/dawonai/SKILL.md`. `CODEX_HOME` doesn't move it. OpenCode and OMP read this folder too. |
+| OpenCode | `~/.config/opencode/skills/dawonai/SKILL.md`, or under `$XDG_CONFIG_HOME/opencode` |
+| OMP | `~/.omp/agent/skills/dawonai/SKILL.md`, or under `$PI_CODING_AGENT_DIR` |
+| Hermes Agent | `~/.hermes/skills/dawonai/SKILL.md`, or under `$HERMES_HOME` |
+
 - **Claude Code**: `~/.claude/settings.json` gets `"apiKeyHelper": "<pai> token"`, `env.ANTHROPIC_BASE_URL`, the model `qwen3.8-27b` for every model alias, the context and output limits, and switches that keep Claude Code from sending traffic to Anthropic. Claude Code reruns the helper every hour and after a 401. An `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_BASE_URL` in the environment Claude Code starts in overrides these settings; `pai setup` warns about them.
-- **Codex**: `~/.codex/config.toml` gets a `[model_providers.privacy-ai]` table using the Responses API, whose `[model_providers.privacy-ai.auth]` runs `pai token`. The model goes in a profile file, `~/.codex/privacy-ai.config.toml`, so start Codex with `codex --profile privacy-ai`.
-- **OpenCode**: the plugin in `integrations/opencode/` goes to `~/.config/opencode/plugins/privacy-ai.ts`, and `opencode.json` gets `"model": "privacy-ai/qwen3.8-27b"`. The plugin registers the provider and runs `pai token`, again after a 401.
-- **OMP**: the extension in `integrations/omp/` goes to `~/.omp/agent/extensions/privacy-ai.ts`. It registers the provider with `pai token` as its key command. Pick `privacy-ai/qwen3.8-27b` with `/model`.
-- **Hermes Agent**: `~/.hermes/config.yaml` (or `$HERMES_HOME/config.yaml`) gets a `privacy-ai` entry under `providers:`, whose `key_cmd` runs `pai token`, between a `# privacy-ai` and an `# end privacy-ai` comment. `pai` edits only those lines and leaves the rest of the file as it was. `key_cmd` needs a Hermes release from August 2026 or later. Your default model stays as it is: pick Privacy AI with `/model custom:privacy-ai:qwen3.8-27b` (add `--global` to keep it), or with `hermes model`.
+- **Codex**: `~/.codex/config.toml` gets a `[model_providers.dawonai]` table using the Responses API, whose `[model_providers.dawonai.auth]` runs `pai token`. The model goes in a profile file, `~/.codex/dawonai.config.toml`, so start Codex with `codex --profile dawonai`.
+- **OpenCode**: the plugin in `integrations/opencode/` goes to `~/.config/opencode/plugins/dawonai.ts`, and `opencode.json` gets `"model": "dawonai/qwen3.8-27b"`. The plugin registers the provider and runs `pai token`, again after a 401.
+- **OMP**: the extension in `integrations/omp/` goes to `~/.omp/agent/extensions/dawonai.ts` (or under `$PI_CODING_AGENT_DIR`). It registers the provider with `pai token` as its key command. Pick `dawonai/qwen3.8-27b` with `/model`.
+- **Hermes Agent**: `~/.hermes/config.yaml` (or `$HERMES_HOME/config.yaml`) gets a `dawonai` entry under `providers:`, whose `key_cmd` runs `pai token`, between a `# dawonai` and an `# end dawonai` comment. `pai` edits only those lines and leaves the rest of the file as it was. `key_cmd` needs a Hermes release from August 2026 or later. Your default model stays as it is: pick DawonAI with `/model custom:dawonai:qwen3.8-27b` (add `--global` to keep it), or with `hermes model`.
 
 ## Build
 
@@ -82,7 +92,7 @@ cargo test
 
 | Path | Holds |
 |---|---|
-| `dist/<version>/` | `pai-{aarch64,x86_64}-apple-darwin`, `pai-{aarch64,x86_64}-unknown-linux-musl`, `pai-{x86_64,aarch64}-pc-windows-msvc.exe`, `privacy-ai-skill.zip`, `opencode-privacy-ai.ts`, `omp-privacy-ai.ts` and `SHA256SUMS` |
+| `dist/<version>/` | `pai-{aarch64,x86_64}-apple-darwin`, `pai-{aarch64,x86_64}-unknown-linux-musl`, `pai-{x86_64,aarch64}-pc-windows-msvc.exe`, `dawonai-skill.zip`, `opencode-dawonai.ts`, `omp-dawonai.ts` and `SHA256SUMS` |
 | `dist/latest/` | A copy of the newest version, which the installers download from |
 | `dist/index.html`, `install.sh`, `install.ps1` | The release page and the installers |
 

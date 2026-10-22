@@ -65,9 +65,9 @@ for target in x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
 done
 
 step "extras"
-(cd skill && rm -f "$out/privacy-ai-skill.zip" && zip -qrX "$out/privacy-ai-skill.zip" privacy-ai)
-cp integrations/opencode/src/index.ts "$out/opencode-privacy-ai.ts"
-cp integrations/omp/privacy-ai.ts "$out/omp-privacy-ai.ts"
+(cd skill && rm -f "$out/dawonai-skill.zip" && zip -qrX "$out/dawonai-skill.zip" dawonai)
+cp integrations/opencode/src/index.ts "$out/opencode-dawonai.ts"
+cp integrations/omp/dawonai.ts "$out/omp-dawonai.ts"
 
 (cd "$out" && shasum -a 256 -- * | grep -v ' SHA256SUMS$' >SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS)
 

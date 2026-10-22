@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process"
 import type { Plugin, PluginModule } from "@opencode-ai/plugin"
 
-export const PROVIDER_ID = "privacy-ai"
+export const PROVIDER_ID = "dawonai"
 export const MODEL_ID = "qwen3.8-27b"
 // `pai setup opencode --apply` rewrites these three lines for the user's install and plan.
 const DEFAULT_BASE_URL = "http://127.0.0.1:47821"
@@ -23,17 +23,17 @@ function runPaiToken(bin: string): Promise<string> {
       if (error) {
         const code = (error as NodeJS.ErrnoException).code
         if (code === "ENOENT") {
-          reject(new Error(`Privacy AI: \`${bin}\` not found. Install the pai CLI or set PAI_BIN.`))
+          reject(new Error(`DawonAI: \`${bin}\` not found. Install the pai CLI or set PAI_BIN.`))
           return
         }
         const detail = String(stderr).trim() || error.message
-        reject(new Error(`Privacy AI: \`pai token\` failed: ${detail}`))
+        reject(new Error(`DawonAI: \`pai token\` failed: ${detail}`))
         return
       }
       const key = String(stdout).trim()
       // Never echo stdout here: if it is a secret in an unexpected shape it must not reach logs.
       if (!key.startsWith("pai-local-") || /\s/.test(key)) {
-        reject(new Error("Privacy AI: `pai token` printed something that isn't pai's local key. Update pai."))
+        reject(new Error("DawonAI: `pai token` printed something that isn't pai's local key. Update pai."))
         return
       }
       resolve(key)
@@ -104,7 +104,7 @@ export function createPaiFetch(credentials: CredentialSource, baseFetch: Fetch =
   }
 }
 
-export const PrivacyAIPlugin: Plugin = async () => {
+export const DawonAIPlugin: Plugin = async () => {
   const credentials = createCredentialSource()
   const paiFetch = createPaiFetch(credentials)
 
@@ -115,7 +115,7 @@ export const PrivacyAIPlugin: Plugin = async () => {
       cfg.provider[PROVIDER_ID] = {
         ...existing,
         npm: existing.npm ?? "@ai-sdk/openai-compatible",
-        name: existing.name ?? "Privacy AI",
+        name: existing.name ?? "DawonAI",
         options: {
           ...existing.options,
           baseURL: existing.options?.baseURL ?? defaultBaseURL(),
@@ -142,7 +142,7 @@ export const PrivacyAIPlugin: Plugin = async () => {
 
 const plugin: PluginModule = {
   id: PROVIDER_ID,
-  server: PrivacyAIPlugin,
+  server: DawonAIPlugin,
 }
 
 export default plugin

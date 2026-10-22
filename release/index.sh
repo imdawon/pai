@@ -23,9 +23,9 @@ describe() {
 	pai-x86_64-unknown-linux-musl) echo "Linux, x86-64 (static)" ;;
 	pai-x86_64-pc-windows-msvc.exe) echo "Windows, x86-64" ;;
 	pai-aarch64-pc-windows-msvc.exe) echo "Windows, ARM64" ;;
-	privacy-ai-skill.zip) echo "Agent skill: unzip into your tool's skills folder" ;;
-	opencode-privacy-ai.ts) echo "OpenCode plugin: copy to ~/.config/opencode/plugins/privacy-ai.ts" ;;
-	omp-privacy-ai.ts) echo "OMP extension: copy to ~/.omp/agent/extensions/privacy-ai.ts" ;;
+	dawonai-skill.zip) echo "Agent skill: unzip into your tool's skills folder" ;;
+	opencode-dawonai.ts) echo "OpenCode plugin: copy to ~/.config/opencode/plugins/dawonai.ts" ;;
+	omp-dawonai.ts) echo "OMP extension: copy to ~/.omp/agent/extensions/dawonai.ts" ;;
 	SHA256SUMS) echo "Checksums for every file above" ;;
 	*) echo "" ;;
 	esac
@@ -33,7 +33,7 @@ describe() {
 rows=""
 for f in pai-aarch64-apple-darwin pai-x86_64-apple-darwin pai-x86_64-unknown-linux-musl \
 	pai-aarch64-unknown-linux-musl pai-x86_64-pc-windows-msvc.exe pai-aarch64-pc-windows-msvc.exe \
-	privacy-ai-skill.zip opencode-privacy-ai.ts omp-privacy-ai.ts SHA256SUMS; do
+	dawonai-skill.zip opencode-dawonai.ts omp-dawonai.ts SHA256SUMS; do
 	hash="$(awk -v f="$f" '$2 == f { print $1 }' "$out/SHA256SUMS")"
 	rows="$rows
       <tr><td><a href=\"latest/$f\">$f</a><span>$(describe "$f")</span></td><td>$(size "$out/$f")</td><td><code>${hash:-}</code></td></tr>"
@@ -49,7 +49,7 @@ cat >"$dist/index.html" <<EOF
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>pai $version · Privacy AI</title>
+<title>pai $version · DawonAI</title>
 <style>
   :root { --brand: #1f5fa6; --text: #1f2033; --dim: #5d5f76; --faint: #8a8ca3; --line: #e3e3ee; --band: #f5f5fa; --page: #fff;
     --sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -79,7 +79,7 @@ cat >"$dist/index.html" <<EOF
 <main class="wrap">
   <header>
     <h1>pai $version</h1>
-    <p>The Privacy AI command-line helper. Coding tools run <code>pai token</code> for a day credential instead of storing an API key.</p>
+    <p>The DawonAI command-line helper. Coding tools run <code>pai token</code> for a day credential instead of storing an API key.</p>
   </header>
 
   <section>

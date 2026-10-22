@@ -1,16 +1,16 @@
-# Privacy AI for OMP
+# DawonAI for OMP
 
-An [oh-my-pi](https://github.com/can1357/oh-my-pi) (OMP) extension that adds the `privacy-ai` provider with the model `qwen3.8-27b`. OMP gets its key by running `pai token`, so no API key is stored in OMP's config.
+An [oh-my-pi](https://github.com/can1357/oh-my-pi) (OMP) extension that adds the `dawonai` provider with the model `qwen3.8-27b`. OMP gets its key by running `pai token`, so no API key is stored in OMP's config.
 
 ## Install
 
-The easy way: `pai setup omp --apply`. It writes `privacy-ai.ts` to `~/.omp/agent/extensions/`, with the path to `pai`, the API URL and your plan's context window filled in.
+The easy way: `pai setup omp --apply`. It writes `dawonai.ts` to `~/.omp/agent/extensions/`, with the path to `pai`, the API URL and your plan's context window filled in.
 
 By hand:
 
 1. Pair this machine: `pai pair <code>`. Check that `pai token` prints a `pai1.` credential.
-2. Copy `privacy-ai.ts` into `~/.omp/agent/extensions/`. A named profile uses `~/.omp/profiles/<name>/agent/extensions/`, and a single project uses `<project>/.omp/extensions/`. To try it without installing: `omp -e /path/to/integrations/omp`.
-3. Restart OMP and pick the model with `/model` (`privacy-ai/qwen3.8-27b`), or start it with `omp --model privacy-ai/qwen3.8-27b`.
+2. Copy `dawonai.ts` into `~/.omp/agent/extensions/`. A named profile uses `~/.omp/profiles/<name>/agent/extensions/`, and a single project uses `<project>/.omp/extensions/`. To try it without installing: `omp -e /path/to/integrations/omp`.
+3. Restart OMP and pick the model with `/model` (`dawonai/qwen3.8-27b`), or start it with `omp --model dawonai/qwen3.8-27b`.
 
 No `/login` is needed.
 
@@ -35,7 +35,7 @@ OMP is a fork of pi, and this follows OMP:
 
 - Extensions live in `~/.omp/agent/extensions`; pi uses `~/.pi/agent/extensions`, which OMP doesn't read.
 - OMP re-runs a `!command` key after a `401`. pi caches the result until it exits, so in pi a session would stop working at UTC midnight.
-- OMP's `registerProvider` has no top-level `name`; the provider shows as `privacy-ai`.
+- OMP's `registerProvider` has no top-level `name`; the provider shows as `dawonai`.
 
 ## Typecheck
 

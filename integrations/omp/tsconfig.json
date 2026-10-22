@@ -10,5 +10,5 @@
     "skipLibCheck": true,
     "verbatimModuleSyntax": true
   },
-  "files": ["privacy-ai.ts"]
+  "files": ["dawonai.ts"]
 }

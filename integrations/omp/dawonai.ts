@@ -5,7 +5,7 @@ const DEFAULT_BASE_URL = "http://127.0.0.1:47821";
 const DEFAULT_PAI_BIN = "pai";
 const CONTEXT_WINDOW = 262144;
 
-const PROVIDER_ID = "privacy-ai";
+const PROVIDER_ID = "dawonai";
 
 // pai's local proxy. It adds the day credential and checks the model API's certificate against
 // pai's pins, so the key OMP holds only works on this machine.
@@ -22,7 +22,7 @@ function shellQuote(s: string): string {
   return /^[A-Za-z0-9_@%+=:,./\\-]+$/.test(s) ? s : `'${s.replaceAll("'", `'\\''`)}'`;
 }
 
-export default function privacyAi(pi: ExtensionAPI): void {
+export default function dawonAi(pi: ExtensionAPI): void {
   pi.registerProvider(PROVIDER_ID, {
     baseUrl: `${baseUrl()}/v1`,
     api: "openai-completions",
@@ -33,7 +33,7 @@ export default function privacyAi(pi: ExtensionAPI): void {
     models: [
       {
         id: "qwen3.8-27b",
-        name: "Qwen 3.8 27B (Privacy AI)",
+        name: "Qwen 3.8 27B (DawonAI)",
         reasoning: true,
         input: ["text"],
         // Billed by plan, not per token.

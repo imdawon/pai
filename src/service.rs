@@ -169,7 +169,7 @@ fn systemd_word(s: &str) -> String {
 
 pub fn unit(env: &Env) -> String {
     let mut out = format!(
-        "[Unit]\nDescription=pai local proxy for Privacy AI\n\n[Service]\nExecStart={} proxy\nRestart=on-failure\nRestartSec=5\n",
+        "[Unit]\nDescription=pai local proxy for DawonAI\n\n[Service]\nExecStart={} proxy\nRestart=on-failure\nRestartSec=5\n",
         systemd_word(&env.pai_bin.to_string_lossy())
     );
     for (k, v) in carried(env) {

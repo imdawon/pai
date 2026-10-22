@@ -1,6 +1,6 @@
 # Testing pai against staging
 
-For people working on Privacy AI, not for users. Nothing here appears in `pai --help` or the
+For people working on DawonAI, not for users. Nothing here appears in `pai --help` or the
 README, on purpose.
 
 ## Test mode

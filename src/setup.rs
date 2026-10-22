@@ -8,9 +8,11 @@ use crate::app::Env;
 use crate::error::{Error, Result, io_err};
 
 pub const MODEL: &str = "qwen3.8-27b";
-pub const PROVIDER_ID: &str = "privacy-ai";
+pub const PROVIDER_ID: &str = "dawonai";
 const OPENCODE_PLUGIN: &str = include_str!("../integrations/opencode/src/index.ts");
-const OMP_EXTENSION: &str = include_str!("../integrations/omp/privacy-ai.ts");
+const OMP_EXTENSION: &str = include_str!("../integrations/omp/dawonai.ts");
+pub const SKILL_NAME: &str = "dawonai";
+const SKILL: &str = include_str!("../skill/dawonai/SKILL.md");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Tool {
@@ -179,6 +181,37 @@ fn js_rewrite(source: &str, target: &Target) -> String {
         + "\n"
 }
 
+/// Where each harness loads personal (not project) skills from, as `<root>/<name>/SKILL.md`.
+pub fn skill_path(env: &Env, tool: Tool) -> PathBuf {
+    let root = match tool {
+        // https://code.claude.com/docs/en/skills, /claude-directory
+        Tool::ClaudeCode => claude_dir(env).join("skills"),
+        // https://learn.chatgpt.com/docs/build-skills lists $HOME/.agents/skills for user skills.
+        // CODEX_HOME doesn't move it; $CODEX_HOME/skills is still read but deprecated.
+        Tool::Codex => env.paths.home.join(".agents").join("skills"),
+        // https://opencode.ai/docs/skills/
+        Tool::Opencode => opencode_dir(env).join("skills"),
+        // oh-my-pi docs/skills.md
+        Tool::Omp => omp_agent_dir(env).join("skills"),
+        // https://hermes-agent.nousresearch.com/docs/user-guide/features/skills
+        Tool::Hermes => hermes_dir(env).join("skills"),
+    };
+    root.join(SKILL_NAME).join("SKILL.md")
+}
+
+fn skill_print(env: &Env, tool: Tool) -> String {
+    format!(
+        "Skill: {} (written by --apply). The DawonAI skill tells the agent how pai works and how to fix it.\n\n",
+        skill_path(env, tool).display()
+    )
+}
+
+fn skill_apply(env: &Env, tool: Tool, log: &mut String) -> Result<()> {
+    write_file(&skill_path(env, tool), SKILL, env.clock.now(), log)?;
+    log.push_str("Installed the DawonAI skill, so the agent knows how pai works.\n");
+    Ok(())
+}
+
 fn tool_dir(env: &Env, var: &str, default: &[&str]) -> PathBuf {
     match env.var(var) {
         Some(d) => PathBuf::from(d),
@@ -190,8 +223,12 @@ fn tool_dir(env: &Env, var: &str, default: &[&str]) -> PathBuf {
 
 // Claude Code: https://code.claude.com/docs/en/settings, /env-vars, /llm-gateway, /model-config
 
+fn claude_dir(env: &Env) -> PathBuf {
+    tool_dir(env, "CLAUDE_CONFIG_DIR", &[".claude"])
+}
+
 fn claude_settings_path(env: &Env) -> PathBuf {
-    tool_dir(env, "CLAUDE_CONFIG_DIR", &[".claude"]).join("settings.json")
+    claude_dir(env).join("settings.json")
 }
 
 fn claude_settings(t: &Target) -> Value {
@@ -246,10 +283,11 @@ fn claude_warnings(env: &Env, t: &Target) -> String {
 
 fn claude_print(env: &Env, t: &Target) -> String {
     format!(
-        "Merge into {}:\n\n{}\nRun `pai setup claude-code --apply` to write it. Claude Code runs `pai token` \
+        "Merge into {}:\n\n{}\n{}Run `pai setup claude-code --apply` to write both. Claude Code runs `pai token` \
          at startup, every hour, and after a 401; it starts pai's local proxy and prints the key for it.\n{}",
         claude_settings_path(env).display(),
         pretty(&claude_settings(t)),
+        skill_print(env, Tool::ClaudeCode),
         claude_warnings(env, t)
     )
 }
@@ -297,7 +335,8 @@ fn claude_apply(env: &Env, t: &Target) -> Result<String> {
         env.clock.now(),
         &mut log,
     )?;
-    log.push_str("Restart Claude Code to use Privacy AI.\n");
+    skill_apply(env, Tool::ClaudeCode, &mut log)?;
+    log.push_str("Restart Claude Code to use DawonAI.\n");
     log.push_str(&claude_warnings(env, t));
     Ok(log)
 }
@@ -311,7 +350,7 @@ fn codex_dir(env: &Env) -> PathBuf {
 fn codex_provider_toml(t: &Target) -> String {
     format!(
         "[model_providers.{PROVIDER_ID}]\n\
-         name = \"Privacy AI\"\n\
+         name = \"DawonAI\"\n\
          base_url = {}\n\
          wire_api = \"responses\"\n\
          \n\
@@ -342,12 +381,13 @@ fn codex_profile_toml(t: &Target) -> String {
 fn codex_print(env: &Env, t: &Target) -> String {
     let dir = codex_dir(env);
     format!(
-        "Add to {}:\n\n{}\nWrite {}:\n\n{}\nRun `pai setup codex --apply` to write both, then start Codex with \
+        "Add to {}:\n\n{}\nWrite {}:\n\n{}\n{}Run `pai setup codex --apply` to write all three, then start Codex with \
          `codex --profile {PROVIDER_ID}`.\n",
         dir.join("config.toml").display(),
         codex_provider_toml(t),
         dir.join(format!("{PROVIDER_ID}.config.toml")).display(),
         codex_profile_toml(t),
+        skill_print(env, Tool::Codex),
     )
 }
 
@@ -405,8 +445,9 @@ fn codex_apply(env: &Env, t: &Target) -> Result<String> {
         now,
         &mut log,
     )?;
+    skill_apply(env, Tool::Codex, &mut log)?;
     log.push_str(&format!(
-        "Start Codex with `codex --profile {PROVIDER_ID}` to use Privacy AI.\n"
+        "Start Codex with `codex --profile {PROVIDER_ID}` to use DawonAI.\n"
     ));
     Ok(log)
 }
@@ -425,12 +466,13 @@ fn opencode_print(env: &Env, t: &Target) -> String {
     format!(
         "Plugin: {} (written by --apply; OpenCode loads every file in plugins/)\n\
          It runs `{} token` to start pai's local proxy, and talks to it at {}/v1.\n\n\
-         Set in {}:\n\n{}\nRun `pai setup opencode --apply` to write both, then restart OpenCode.\n",
-        dir.join("plugins").join("privacy-ai.ts").display(),
+         Set in {}:\n\n{}\n{}Run `pai setup opencode --apply` to write all three, then restart OpenCode.\n",
+        dir.join("plugins").join("dawonai.ts").display(),
         t.pai_bin,
         t.base_url,
         dir.join("opencode.json").display(),
         pretty(&json!({ "model": format!("{PROVIDER_ID}/{MODEL}") })),
+        skill_print(env, Tool::Opencode),
     )
 }
 
@@ -439,7 +481,7 @@ fn opencode_apply(env: &Env, t: &Target) -> Result<String> {
     let now = env.clock.now();
     let mut log = String::new();
     write_file(
-        &dir.join("plugins").join("privacy-ai.ts"),
+        &dir.join("plugins").join("dawonai.ts"),
         &js_rewrite(OPENCODE_PLUGIN, t),
         now,
         &mut log,
@@ -459,30 +501,32 @@ fn opencode_apply(env: &Env, t: &Target) -> Result<String> {
         cfg.insert("model".into(), json!(format!("{PROVIDER_ID}/{MODEL}")));
         write_file(&json_path, &pretty(&Value::Object(cfg)), now, &mut log)?;
     }
-    log.push_str("Restart OpenCode to use Privacy AI.\n");
+    skill_apply(env, Tool::Opencode, &mut log)?;
+    log.push_str("Restart OpenCode to use DawonAI.\n");
     Ok(log)
 }
 
 // OMP: https://github.com/can1357/oh-my-pi docs/extensions.md, docs/models.md
 
+/// PI_CODING_AGENT_DIR replaces OMP's agent directory (oh-my-pi packages/utils/src/dirs.ts).
+fn omp_agent_dir(env: &Env) -> PathBuf {
+    tool_dir(env, "PI_CODING_AGENT_DIR", &[".omp", "agent"])
+}
+
 fn omp_extension_path(env: &Env) -> PathBuf {
-    env.paths
-        .home
-        .join(".omp")
-        .join("agent")
-        .join("extensions")
-        .join("privacy-ai.ts")
+    omp_agent_dir(env).join("extensions").join("dawonai.ts")
 }
 
 fn omp_print(env: &Env, t: &Target) -> String {
     format!(
         "Extension: {} (written by --apply)\n\
          It registers the {PROVIDER_ID} provider at pai's local proxy, {}/v1, with the key command `{} token`.\n\n\
-         Run `pai setup omp --apply` to write it, restart OMP, and pick {PROVIDER_ID}/{MODEL} with /model \
+         {}Run `pai setup omp --apply` to write both, restart OMP, and pick {PROVIDER_ID}/{MODEL} with /model \
          (or start `omp --model {PROVIDER_ID}/{MODEL}`).\n",
         omp_extension_path(env).display(),
         t.base_url,
         t.pai_bin,
+        skill_print(env, Tool::Omp),
     )
 }
 
@@ -494,6 +538,7 @@ fn omp_apply(env: &Env, t: &Target) -> Result<String> {
         env.clock.now(),
         &mut log,
     )?;
+    skill_apply(env, Tool::Omp, &mut log)?;
     log.push_str(&format!(
         "Restart OMP and pick {PROVIDER_ID}/{MODEL} with /model, or start `omp --model {PROVIDER_ID}/{MODEL}`.\n"
     ));
@@ -503,8 +548,8 @@ fn omp_apply(env: &Env, t: &Target) -> Result<String> {
 // Hermes Agent: https://github.com/NousResearch/hermes-agent cli-config.yaml.example,
 // https://hermes-agent.nousresearch.com/docs/integrations/providers
 
-const HERMES_BEGIN: &str = "# privacy-ai (managed by pai setup hermes)";
-const HERMES_END: &str = "# end privacy-ai";
+const HERMES_BEGIN: &str = "# dawonai (managed by pai setup hermes)";
+const HERMES_END: &str = "# end dawonai";
 
 fn hermes_dir(env: &Env) -> PathBuf {
     if let Some(d) = env.var("HERMES_HOME") {
@@ -538,7 +583,7 @@ fn hermes_block(t: &Target, indent: &str, step: &str, nl: &str) -> String {
     [
         format!("{indent}{HERMES_BEGIN}"),
         format!("{indent}{PROVIDER_ID}:"),
-        format!("{i1}name: Privacy AI"),
+        format!("{i1}name: DawonAI"),
         format!("{i1}api: {}", yaml_str(&format!("{}/v1", t.base_url))),
         format!("{i1}key_cmd: {}", yaml_str(&hermes_key_cmd(t))),
         format!("{i1}api_mode: chat_completions"),
@@ -581,7 +626,7 @@ fn entry_end(lines: &[&str], start: usize, indent: usize) -> usize {
 
 /// Puts our provider into a Hermes config.yaml by editing the text, so the user's comments and
 /// layout survive: a YAML library would drop them. Replaces our marked block, or an unmarked
-/// `privacy-ai` provider, or adds the block under `providers:`, creating that if needed.
+/// `dawonai` provider, or adds the block under `providers:`, creating that if needed.
 fn hermes_merge(text: &str, path: &Path, t: &Target) -> Result<(String, &'static str)> {
     let nl = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let lines: Vec<&str> = text.split_inclusive('\n').collect();
@@ -669,17 +714,18 @@ fn hermes_merge(text: &str, path: &Path, t: &Target) -> Result<(String, &'static
 
 fn hermes_switch_hint() -> String {
     format!(
-        "Your default model stays as it is. To use Privacy AI, type `/model custom:{PROVIDER_ID}:{MODEL}` in Hermes \
-         (add `--global` to make it the default), or run `hermes model` and pick Privacy AI.\n"
+        "Your default model stays as it is. To use DawonAI, type `/model custom:{PROVIDER_ID}:{MODEL}` in Hermes \
+         (add `--global` to make it the default), or run `hermes model` and pick DawonAI.\n"
     )
 }
 
 fn hermes_print(env: &Env, t: &Target) -> String {
     format!(
         "Add under `providers:` in {}:\n\n{}\nHermes runs `pai token` for its key (it needs a Hermes release from \
-         August 2026 or later, which supports `key_cmd`). Run `pai setup hermes --apply` to write it.\n\n{}",
+         August 2026 or later, which supports `key_cmd`).\n\n{}Run `pai setup hermes --apply` to write both.\n\n{}",
         hermes_config_path(env).display(),
         hermes_block(t, "  ", "  ", "\n"),
+        skill_print(env, Tool::Hermes),
         hermes_switch_hint()
     )
 }
@@ -695,6 +741,7 @@ fn hermes_apply(env: &Env, t: &Target) -> Result<String> {
     let mut log = String::new();
     write_file(&path, &merged, env.clock.now(), &mut log)?;
     log.push_str(&format!("{what} the {PROVIDER_ID} provider. Hermes runs `pai token` for its key.\n"));
+    skill_apply(env, Tool::Hermes, &mut log)?;
     log.push_str(&hermes_switch_hint());
     Ok(log)
 }

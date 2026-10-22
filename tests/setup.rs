@@ -93,7 +93,7 @@ fn codex_adds_provider_and_profile() {
     fs::create_dir_all(&dir).unwrap();
     fs::write(
         dir.join("config.toml"),
-        "# my settings\nmodel = \"gpt-5\"\n\n[model_providers.other]\nname = \"Other\"\n\n[profiles.privacy-ai]\nmodel = \"old\"\n",
+        "# my settings\nmodel = \"gpt-5\"\n\n[model_providers.other]\nname = \"Other\"\n\n[profiles.dawonai]\nmodel = \"old\"\n",
     )
     .unwrap();
 
@@ -107,7 +107,7 @@ fn codex_adds_provider_and_profile() {
         doc["model_providers"]["other"]["name"].as_str(),
         Some("Other")
     );
-    let p = &doc["model_providers"]["privacy-ai"];
+    let p = &doc["model_providers"]["dawonai"];
     assert_eq!(p["base_url"].as_str(), Some("http://127.0.0.1:47821/v1"));
     assert_eq!(p["wire_api"].as_str(), Some("responses"));
     assert_eq!(p["auth"]["command"].as_str(), Some("/opt/pai/bin/pai"));
@@ -122,15 +122,15 @@ fn codex_adds_provider_and_profile() {
     assert!(p["auth"]["refresh_interval_ms"].as_integer().is_some());
     assert!(
         doc.get("profiles")
-            .and_then(|p| p.get("privacy-ai"))
+            .and_then(|p| p.get("dawonai"))
             .is_none()
     );
 
-    let profile: toml_edit::DocumentMut = fs::read_to_string(dir.join("privacy-ai.config.toml"))
+    let profile: toml_edit::DocumentMut = fs::read_to_string(dir.join("dawonai.config.toml"))
         .unwrap()
         .parse()
         .unwrap();
-    assert_eq!(profile["model_provider"].as_str(), Some("privacy-ai"));
+    assert_eq!(profile["model_provider"].as_str(), Some("dawonai"));
     assert_eq!(profile["model"].as_str(), Some("qwen3.8-27b"));
     assert_eq!(profile["model_context_window"].as_integer(), Some(262144));
     assert_eq!(backups(&dir).len(), 1);
@@ -138,7 +138,7 @@ fn codex_adds_provider_and_profile() {
     setup::run(&t.env, Tool::Codex, &target(&t, 262144), true).unwrap();
     let again = fs::read_to_string(dir.join("config.toml")).unwrap();
     assert_eq!(
-        again.matches("[model_providers.privacy-ai]").count(),
+        again.matches("[model_providers.dawonai]").count(),
         1,
         "{again}"
     );
@@ -153,13 +153,13 @@ fn opencode_writes_plugin_and_model() {
 
     setup::run(&t.env, Tool::Opencode, &target(&t, 65536), true).unwrap();
 
-    let plugin = fs::read_to_string(dir.join("plugins").join("privacy-ai.ts")).unwrap();
+    let plugin = fs::read_to_string(dir.join("plugins").join("dawonai.ts")).unwrap();
     assert!(plugin.contains("const DEFAULT_PAI_BIN = \"/opt/pai/bin/pai\"\n"));
     assert!(plugin.contains("const DEFAULT_BASE_URL = \"http://127.0.0.1:47821\"\n"));
     assert!(plugin.contains("const CONTEXT_WINDOW = 65536\n"));
     let v: Value =
         serde_json::from_str(&fs::read_to_string(dir.join("opencode.json")).unwrap()).unwrap();
-    assert_eq!(v["model"], "privacy-ai/qwen3.8-27b");
+    assert_eq!(v["model"], "dawonai/qwen3.8-27b");
     assert_eq!(v["theme"], "tokyonight");
 }
 
@@ -167,7 +167,7 @@ fn opencode_writes_plugin_and_model() {
 fn omp_writes_extension() {
     let t = TestEnv::new();
     setup::run(&t.env, Tool::Omp, &target(&t, 262144), true).unwrap();
-    let ext = fs::read_to_string(t.home().join(".omp/agent/extensions/privacy-ai.ts")).unwrap();
+    let ext = fs::read_to_string(t.home().join(".omp/agent/extensions/dawonai.ts")).unwrap();
     assert!(ext.contains("const DEFAULT_PAI_BIN = \"/opt/pai/bin/pai\";\n"));
     assert!(ext.contains("const CONTEXT_WINDOW = 262144;\n"));
     assert!(ext.contains("registerProvider"));
@@ -205,9 +205,9 @@ fn hermes_path(t: &TestEnv) -> std::path::PathBuf {
 
 /// Our block, from its marker to its end marker, and the file with it cut out.
 fn split_block(text: &str) -> (String, String) {
-    let begin = text.find("# privacy-ai (managed by pai setup hermes)").expect("our block");
+    let begin = text.find("# dawonai (managed by pai setup hermes)").expect("our block");
     let begin = text[..begin].rfind('\n').map_or(0, |i| i + 1);
-    let end_marker = "# end privacy-ai\n";
+    let end_marker = "# end dawonai\n";
     let end = text[begin..].find(end_marker).unwrap() + begin + end_marker.len();
     (text[begin..end].to_string(), format!("{}{}", &text[..begin], &text[end..]))
 }
@@ -219,16 +219,16 @@ fn hermes_adds_provider_and_keeps_everything_else() {
     fs::write(hermes_path(&t), HERMES_CONFIG).unwrap();
 
     let out = setup::run(&t.env, Tool::Hermes, &target(&t, 65536), true).unwrap();
-    assert!(out.contains("Backed up") && out.contains("Added the privacy-ai provider"), "{out}");
-    assert!(out.contains("/model custom:privacy-ai:qwen3.8-27b"), "{out}");
+    assert!(out.contains("Backed up") && out.contains("Added the dawonai provider"), "{out}");
+    assert!(out.contains("/model custom:dawonai:qwen3.8-27b"), "{out}");
     assert_eq!(backups(&t.home().join(".hermes")).len(), 1);
 
     let text = fs::read_to_string(hermes_path(&t)).unwrap();
     let (block, rest) = split_block(&text);
     assert_eq!(rest, HERMES_CONFIG, "everything outside our block is untouched");
-    assert!(text.contains("providers:\n  # privacy-ai (managed by pai setup hermes)\n  privacy-ai:\n"), "{text}");
+    assert!(text.contains("providers:\n  # dawonai (managed by pai setup hermes)\n  dawonai:\n"), "{text}");
     for line in [
-        "    name: Privacy AI\n",
+        "    name: DawonAI\n",
         "    api: \"http://127.0.0.1:47821/v1\"\n",
         "    default_model: qwen3.8-27b\n",
         "    models:\n      qwen3.8-27b:\n        context_length: 65536\n",
@@ -251,20 +251,20 @@ fn hermes_rerun_replaces_its_block() {
 
     setup::run(&t.env, Tool::Hermes, &target(&t, 65536), true).unwrap();
     let out = setup::run(&t.env, Tool::Hermes, &target(&t, 262144), true).unwrap();
-    assert!(out.contains("Replaced the privacy-ai provider"), "{out}");
+    assert!(out.contains("Replaced the dawonai provider"), "{out}");
     let text = fs::read_to_string(hermes_path(&t)).unwrap();
-    assert_eq!(text.matches("privacy-ai:").count(), 1, "{text}");
-    assert_eq!(text.matches("# privacy-ai (managed by pai setup hermes)").count(), 1);
-    assert!(text.contains("context_length: 262144\n  # end privacy-ai"), "{text}");
+    assert_eq!(text.matches("dawonai:").count(), 1, "{text}");
+    assert_eq!(text.matches("# dawonai (managed by pai setup hermes)").count(), 1);
+    assert!(text.contains("context_length: 262144\n  # end dawonai"), "{text}");
     assert_eq!(split_block(&text).1, HERMES_CONFIG);
 
-    // An unmarked privacy-ai entry, as left by hand or a tool that dropped comments, is replaced too.
+    // An unmarked dawonai entry, as left by hand or a tool that dropped comments, is replaced too.
     let (block, _) = split_block(&text);
     let bare: String = block.lines().filter(|l| !l.trim_start().starts_with('#')).map(|l| format!("{l}\n")).collect();
     fs::write(hermes_path(&t), HERMES_CONFIG.replace("providers:\n", &format!("providers:\n{bare}"))).unwrap();
     setup::run(&t.env, Tool::Hermes, &target(&t, 262144), true).unwrap();
     let text = fs::read_to_string(hermes_path(&t)).unwrap();
-    assert_eq!(text.matches("privacy-ai:").count(), 1, "{text}");
+    assert_eq!(text.matches("dawonai:").count(), 1, "{text}");
     assert_eq!(split_block(&text).1, HERMES_CONFIG);
 }
 
@@ -277,13 +277,13 @@ fn hermes_creates_providers_when_missing() {
 
     setup::run(&t.env, Tool::Hermes, &target(&t, 65536), true).unwrap();
     let text = fs::read_to_string(hermes_path(&t)).unwrap();
-    assert!(text.starts_with(&format!("{original}\n\nproviders:\n  # privacy-ai (managed by pai setup hermes)\n")), "{text}");
+    assert!(text.starts_with(&format!("{original}\n\nproviders:\n  # dawonai (managed by pai setup hermes)\n")), "{text}");
     assert!(text.contains("  default: some-model\n"), "the default model is left alone");
 
     let empty = TestEnv::with_config();
     setup::run(&empty.env, Tool::Hermes, &target(&empty, 65536), true).unwrap();
     let text = fs::read_to_string(hermes_path(&empty)).unwrap();
-    assert!(text.starts_with("providers:\n  # privacy-ai"), "{text}");
+    assert!(text.starts_with("providers:\n  # dawonai"), "{text}");
 }
 
 #[test]
@@ -293,13 +293,13 @@ fn hermes_handles_four_space_indent_crlf_and_empty_flow() {
     fs::write(hermes_path(&t), "providers:\r\n    other:\r\n        api: http://x/v1\r\n").unwrap();
     setup::run(&t.env, Tool::Hermes, &target(&t, 65536), true).unwrap();
     let text = fs::read_to_string(hermes_path(&t)).unwrap();
-    assert!(text.contains("providers:\r\n    # privacy-ai (managed by pai setup hermes)\r\n    privacy-ai:\r\n        name: Privacy AI\r\n"), "{text:?}");
-    assert!(text.ends_with("    # end privacy-ai\r\n    other:\r\n        api: http://x/v1\r\n"), "{text:?}");
+    assert!(text.contains("providers:\r\n    # dawonai (managed by pai setup hermes)\r\n    dawonai:\r\n        name: DawonAI\r\n"), "{text:?}");
+    assert!(text.ends_with("    # end dawonai\r\n    other:\r\n        api: http://x/v1\r\n"), "{text:?}");
 
     fs::write(hermes_path(&t), "providers: {} # none yet\n").unwrap();
     setup::run(&t.env, Tool::Hermes, &target(&t, 65536), true).unwrap();
     let text = fs::read_to_string(hermes_path(&t)).unwrap();
-    assert!(text.starts_with("providers: # none yet\n  # privacy-ai"), "{text}");
+    assert!(text.starts_with("providers: # none yet\n  # dawonai"), "{text}");
 
     fs::write(hermes_path(&t), "providers: {a: {api: x}}\n").unwrap();
     assert!(setup::run(&t.env, Tool::Hermes, &target(&t, 65536), true).is_err());
@@ -317,4 +317,113 @@ fn hermes_follows_hermes_home() {
     setup::run(&t.env, Tool::Hermes, &target(&t, 65536), true).unwrap();
     assert!(dir.join("config.yaml").exists());
     assert!(!t.home().join(".hermes").exists());
+}
+
+const SKILL: &str = include_str!("../skill/dawonai/SKILL.md");
+
+/// The skill's file under the test home, for each harness with default settings.
+fn skill_file(t: &TestEnv, tool: Tool) -> std::path::PathBuf {
+    let root = match tool {
+        Tool::ClaudeCode => t.home().join(".claude/skills"),
+        Tool::Codex => t.home().join(".agents/skills"),
+        Tool::Opencode => t.home().join(".config/opencode/skills"),
+        Tool::Omp => t.home().join(".omp/agent/skills"),
+        Tool::Hermes => t.home().join(".hermes/skills"),
+    };
+    root.join("dawonai").join("SKILL.md")
+}
+
+const TOOLS: [Tool; 5] = [Tool::ClaudeCode, Tool::Codex, Tool::Opencode, Tool::Omp, Tool::Hermes];
+
+#[test]
+fn skill_is_named_dawonai() {
+    assert!(SKILL.starts_with("---\nname: dawonai\ndescription: "), "{SKILL}");
+    let front = SKILL.split("\n---\n").next().unwrap();
+    let description = front.lines().find_map(|l| l.strip_prefix("description: ")).unwrap();
+    assert!(description.len() <= 1024, "the Agent Skills spec caps descriptions at 1024 characters");
+    assert!(!SKILL.contains("Privacy AI") && !SKILL.contains("privacy-ai"));
+    assert!(!SKILL.to_lowercase().contains("test mode") && !SKILL.contains("--test-"));
+}
+
+#[test]
+fn print_mode_says_where_the_skill_goes() {
+    let t = TestEnv::new();
+    for tool in TOOLS {
+        let out = setup::run(&t.env, tool, &target(&t, 65536), false).unwrap();
+        assert!(out.contains(&skill_file(&t, tool).display().to_string()), "{tool:?}: {out}");
+    }
+    assert!(!t.home().exists());
+}
+
+#[test]
+fn apply_installs_the_skill_for_each_harness() {
+    for tool in TOOLS {
+        let t = TestEnv::with_config();
+        let out = setup::run(&t.env, tool, &target(&t, 65536), true).unwrap();
+        let path = skill_file(&t, tool);
+        assert_eq!(setup::skill_path(&t.env, tool), path);
+        assert_eq!(fs::read_to_string(&path).unwrap(), SKILL, "{tool:?}");
+        assert!(out.contains(&format!("Wrote {}", path.display())), "{tool:?}: {out}");
+        assert!(out.contains("Installed the DawonAI skill"), "{tool:?}: {out}");
+        assert!(backups(path.parent().unwrap()).is_empty(), "nothing to back up the first time");
+    }
+}
+
+#[test]
+fn rerun_backs_up_and_replaces_the_skill() {
+    for tool in TOOLS {
+        let mut t = TestEnv::with_config();
+        t.env.clock = pai::app::Clock::Fixed(1_800_000_000);
+        let path = skill_file(&t, tool);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "---\nname: dawonai\ndescription: an old copy\n---\n").unwrap();
+
+        let out = setup::run(&t.env, tool, &target(&t, 65536), true).unwrap();
+        assert!(out.contains(&format!("Backed up {}", path.display())), "{tool:?}: {out}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), SKILL);
+        let dir = path.parent().unwrap();
+        assert_eq!(backups(dir), vec!["SKILL.md.pai-backup-1800000000".to_string()]);
+        assert!(fs::read_to_string(dir.join("SKILL.md.pai-backup-1800000000")).unwrap().contains("an old copy"));
+
+        t.env.clock = pai::app::Clock::Fixed(1_800_000_060);
+        setup::run(&t.env, tool, &target(&t, 65536), true).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), SKILL);
+        assert_eq!(backups(dir).len(), 2, "{tool:?}");
+        let names: Vec<String> = fs::read_dir(dir.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["dawonai".to_string()], "only our skill's directory");
+    }
+}
+
+#[test]
+fn skill_follows_each_harness_config_dir() {
+    let mut t = TestEnv::with_config();
+    let base = t.dir.path().join("elsewhere");
+    for (var, dir) in [
+        ("CLAUDE_CONFIG_DIR", "claude"),
+        ("XDG_CONFIG_HOME", "xdg"),
+        ("PI_CODING_AGENT_DIR", "omp-agent"),
+        ("HERMES_HOME", "hermes"),
+        ("CODEX_HOME", "codex"),
+    ] {
+        t.env.vars.insert(var.into(), base.join(dir).to_string_lossy().into_owned());
+    }
+    let expected = [
+        (Tool::ClaudeCode, base.join("claude/skills")),
+        (Tool::Opencode, base.join("xdg/opencode/skills")),
+        (Tool::Omp, base.join("omp-agent/skills")),
+        (Tool::Hermes, base.join("hermes/skills")),
+        // Codex reads user skills from ~/.agents/skills whatever CODEX_HOME says.
+        (Tool::Codex, t.home().join(".agents/skills")),
+    ];
+    fs::create_dir_all(base.join("codex")).unwrap();
+    for (tool, root) in expected {
+        setup::run(&t.env, tool, &target(&t, 65536), true).unwrap();
+        let path = root.join("dawonai").join("SKILL.md");
+        assert_eq!(fs::read_to_string(&path).unwrap(), SKILL, "{tool:?}");
+    }
+    assert!(base.join("omp-agent/extensions/dawonai.ts").exists());
+    assert!(!t.home().join(".claude").exists() && !t.home().join(".omp").exists());
 }
