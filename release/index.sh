@@ -13,7 +13,7 @@ out="$dist/$version"
 
 size() {
 	n="$(stat -f %z "$1")"
-	awk -v n="$n" 'BEGIN { if (n >= 1048576) printf "%.1f MB", n / 1048576; else printf "%.0f KB", n / 1024 }'
+	awk -v n="$n" 'BEGIN { if (n >= 1048576) printf "%.1f MB", n / 1048576; else if (n >= 1024) printf "%.0f KB", n / 1024; else printf "%d bytes", n }'
 }
 describe() {
 	case "$1" in
@@ -27,17 +27,20 @@ describe() {
 	opencode-dawonai.ts) echo "OpenCode plugin: copy to ~/.config/opencode/plugins/dawonai.ts" ;;
 	omp-dawonai.ts) echo "OMP extension: copy to ~/.omp/agent/extensions/dawonai.ts" ;;
 	SHA256SUMS) echo "Checksums for every file above" ;;
+	SHA256SUMS.sig) echo "Ed25519 signature of SHA256SUMS, for OpenSSL 3" ;;
+	SHA256SUMS.sshsig) echo "The same signature in OpenSSH's format, for ssh-keygen" ;;
 	*) echo "" ;;
 	esac
 }
 rows=""
 for f in pai-aarch64-apple-darwin pai-x86_64-apple-darwin pai-x86_64-unknown-linux-musl \
 	pai-aarch64-unknown-linux-musl pai-x86_64-pc-windows-msvc.exe pai-aarch64-pc-windows-msvc.exe \
-	dawonai-skill.zip opencode-dawonai.ts omp-dawonai.ts SHA256SUMS; do
+	dawonai-skill.zip opencode-dawonai.ts omp-dawonai.ts SHA256SUMS SHA256SUMS.sig SHA256SUMS.sshsig; do
 	hash="$(awk -v f="$f" '$2 == f { print $1 }' "$out/SHA256SUMS")"
 	rows="$rows
       <tr><td><a href=\"latest/$f\">$f</a><span>$(describe "$f")</span></td><td>$(size "$out/$f")</td><td><code>${hash:-}</code></td></tr>"
 done
+key="$(cat release/signing-key.pub)"
 older=""
 for d in $(cd "$dist" && ls -d */ 2>/dev/null | tr -d / | grep -v '^latest$' | sort -r); do
 	older="$older <a href=\"$d/SHA256SUMS\">$d</a>"
@@ -88,7 +91,14 @@ cat >"$dist/index.html" <<EOF
     <pre><code>curl -fsSL $SITE/pai/install.sh -o /tmp/pai-install.sh &amp;&amp; sh /tmp/pai-install.sh</code></pre>
     <p>Windows (PowerShell):</p>
     <pre><code>irm $SITE/pai/install.ps1 -OutFile \$env:TEMP\\pai-install.ps1; powershell -ExecutionPolicy Bypass -File \$env:TEMP\\pai-install.ps1</code></pre>
-    <p class="note">The installers download from <a href="latest/">latest/</a>, check the file against <code>SHA256SUMS</code>, and refuse to install on a mismatch. Read them first: <a href="install.sh">install.sh</a>, <a href="install.ps1">install.ps1</a>.</p>
+    <p class="note">The installers download from <a href="latest/">latest/</a>, check the signature on <code>SHA256SUMS</code> with the pai release key, check the file against <code>SHA256SUMS</code>, and refuse to install if either check fails. Read them first: <a href="install.sh">install.sh</a>, <a href="install.ps1">install.ps1</a>.</p>
+  </section>
+
+  <section>
+    <h2>Release key</h2>
+    <p>Every release's <code>SHA256SUMS</code> is signed with this Ed25519 key, which is kept offline. The installers carry the same key, and so does pai's README on GitHub. Compare them.</p>
+    <pre><code>$key</code></pre>
+    <p class="note">Check a release by hand with OpenSSL 3: save the key as <code>pai-release.pub</code>, then run <code>openssl pkeyutl -verify -pubin -inkey pai-release.pub -rawin -in SHA256SUMS -sigfile SHA256SUMS.sig</code>.</p>
   </section>
 
   <section>

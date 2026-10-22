@@ -1,7 +1,13 @@
 #!/bin/sh
-# Installs pai on macOS or Linux: downloads the release binary for this OS and CPU, checks it
-# against SHA256SUMS, and puts it in ~/.local/bin (or $PAI_INSTALL_DIR).
+# Installs pai on macOS or Linux: downloads the release binary for this OS and CPU, checks the
+# Ed25519 signature on SHA256SUMS with the pai release key below, checks the binary against
+# SHA256SUMS, and puts it in ~/.local/bin (or $PAI_INSTALL_DIR).
 set -eu
+
+# The pai release key (release/signing-key.pub), written here by release/embed-key.sh. The same
+# key is in pai's README on GitHub and on https://privacyai.example/pai/.
+SIGNING_KEY_SPKI=''
+SIGNING_KEY_SSH=''
 
 BASE="${PAI_DOWNLOAD_BASE:-https://privacyai.example/pai/latest}"
 BASE="${BASE%/}"
@@ -11,6 +17,9 @@ fail() {
 	echo "pai install: $*" >&2
 	exit 1
 }
+
+[ -n "$SIGNING_KEY_SPKI" ] && [ -n "$SIGNING_KEY_SSH" ] ||
+	fail "this copy of install.sh has no pai release key, so it can't check the download. Use https://privacyai.example/pai/install.sh"
 
 case "$(uname -s)" in
 Linux) os=unknown-linux-musl ;;
@@ -52,12 +61,55 @@ sha256() {
 	fi
 }
 
+# OpenSSL 3 checks Ed25519 signatures. LibreSSL (macOS's openssl) and OpenSSL 1.1 can't.
+openssl_can_verify() {
+	command -v openssl >/dev/null 2>&1 || return 1
+	case "$(openssl version 2>/dev/null)" in
+	"OpenSSL "[3-9].*) return 0 ;;
+	esac
+	return 1
+}
+
+# `ssh-keygen -Y verify` arrived in OpenSSH 8.1. macOS ships OpenSSH.
+ssh_keygen_can_verify() {
+	command -v ssh-keygen >/dev/null 2>&1 && command -v ssh >/dev/null 2>&1 || return 1
+	v="$(ssh -V 2>&1 | sed -n 's/^OpenSSH_\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1 \2/p')"
+	[ -n "$v" ] || return 1
+	set -- $v
+	[ "$1" -gt 8 ] || { [ "$1" -eq 8 ] && [ "$2" -ge 1 ]; }
+}
+
+not_signed() {
+	fail "SHA256SUMS from $BASE isn't signed by the pai release key, so the download may have been changed; not installing"
+}
+
+check_signature() {
+	if openssl_can_verify; then
+		download "$BASE/SHA256SUMS.sig" "$tmp/SHA256SUMS.sig" || fail "couldn't download $BASE/SHA256SUMS.sig"
+		printf -- '-----BEGIN PUBLIC KEY-----\n%s\n-----END PUBLIC KEY-----\n' "$SIGNING_KEY_SPKI" >"$tmp/release-key.pem"
+		openssl pkeyutl -verify -pubin -inkey "$tmp/release-key.pem" -rawin \
+			-in "$tmp/SHA256SUMS" -sigfile "$tmp/SHA256SUMS.sig" >/dev/null 2>&1 || not_signed
+		echo "Checked the signature on SHA256SUMS with OpenSSL."
+	elif ssh_keygen_can_verify; then
+		download "$BASE/SHA256SUMS.sshsig" "$tmp/SHA256SUMS.sshsig" || fail "couldn't download $BASE/SHA256SUMS.sshsig"
+		echo "pai-release ssh-ed25519 $SIGNING_KEY_SSH" >"$tmp/allowed_signers"
+		ssh-keygen -Y verify -f "$tmp/allowed_signers" -I pai-release -n pai-release \
+			-s "$tmp/SHA256SUMS.sshsig" <"$tmp/SHA256SUMS" >/dev/null 2>&1 || not_signed
+		echo "Checked the signature on SHA256SUMS with ssh-keygen."
+	elif [ "${PAI_SKIP_SIGNATURE_CHECK:-}" = 1 ]; then
+		echo "pai install: warning: PAI_SKIP_SIGNATURE_CHECK=1, so the signature on SHA256SUMS isn't checked. Only the checksum, from the same server as the binary, protects this install." >&2
+	else
+		fail "can't check the signature on SHA256SUMS: this computer has neither OpenSSL 3 nor OpenSSH 8.1 or later. Install either one and run this again, or set PAI_SKIP_SIGNATURE_CHECK=1 to install with only the checksum check"
+	fi
+}
+
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
 echo "Downloading $asset from $BASE"
 download "$BASE/$asset" "$tmp/pai" || fail "couldn't download $BASE/$asset"
 download "$BASE/SHA256SUMS" "$tmp/SHA256SUMS" || fail "couldn't download $BASE/SHA256SUMS"
+check_signature
 
 expected="$(awk -v f="$asset" '$2 == f || $2 == "*" f { print $1; exit }' "$tmp/SHA256SUMS")"
 [ -n "$expected" ] || fail "SHA256SUMS has no entry for $asset"

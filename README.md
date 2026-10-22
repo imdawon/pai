@@ -20,7 +20,17 @@ Windows (PowerShell):
 irm https://privacyai.example/pai/install.ps1 -OutFile $env:TEMP\pai-install.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\pai-install.ps1
 ```
 
-Both download the binary for your OS and CPU, check it against `SHA256SUMS`, and install to `~/.local/bin` or `%LOCALAPPDATA%\pai`. `PAI_DOWNLOAD_BASE` changes where they download from, and `PAI_INSTALL_DIR` where they install.
+Both download the binary for your OS and CPU, check the signature on `SHA256SUMS` with the pai release key (below), check the binary against `SHA256SUMS`, and install to `~/.local/bin` or `%LOCALAPPDATA%\pai`. `PAI_DOWNLOAD_BASE` changes where they download from, and `PAI_INSTALL_DIR` where they install.
+
+The installers check the signature with OpenSSL 3, or with `ssh-keygen` from OpenSSH 8.1 or later. macOS ships OpenSSH. Ubuntu 22.04, Debian 12, Fedora 36 and RHEL 9 and later ship OpenSSL 3. On Windows, `install.ps1` uses the Windows OpenSSH client (**Settings > System > Optional features**), or an OpenSSL 3 such as the one Git for Windows carries. With neither, the installers stop. `PAI_SKIP_SIGNATURE_CHECK=1` installs anyway, with only the checksum, which comes from the same server as the binary.
+
+### Release key
+
+Every release's `SHA256SUMS` is signed with this Ed25519 key, which is kept offline. A changed binary or `SHA256SUMS` fails the installers' check. The installers come from the same server as the binaries, so whoever controls that server could change the key in them too: compare the key in `install.sh` or `install.ps1` with this one, or download the installer from this repo. The release page shows the same key. `release/SIGNING.md` covers checking a download by hand.
+
+<!-- release-key -->
+No release key has been made yet.
+<!-- /release-key -->
 
 Or paste `skill/dawonai/SKILL.md` into your coding agent, and it does all of this for you.
 
@@ -97,11 +107,11 @@ cargo test --features test-mode
 
 | Path | Holds |
 |---|---|
-| `dist/<version>/` | `pai-{aarch64,x86_64}-apple-darwin`, `pai-{aarch64,x86_64}-unknown-linux-musl`, `pai-{x86_64,aarch64}-pc-windows-msvc.exe`, `dawonai-skill.zip`, `opencode-dawonai.ts`, `omp-dawonai.ts` and `SHA256SUMS` |
+| `dist/<version>/` | `pai-{aarch64,x86_64}-apple-darwin`, `pai-{aarch64,x86_64}-unknown-linux-musl`, `pai-{x86_64,aarch64}-pc-windows-msvc.exe`, `dawonai-skill.zip`, `opencode-dawonai.ts`, `omp-dawonai.ts`, `SHA256SUMS`, and its signatures `SHA256SUMS.sig` and `SHA256SUMS.sshsig` |
 | `dist/latest/` | A copy of the newest version, which the installers download from |
 | `dist/index.html`, `install.sh`, `install.ps1` | The release page and the installers |
 
-`release/index.sh <version>` redoes only the page. The binaries aren't signed; `release/SIGNING.md` covers what signing takes and what users can do meanwhile.
+`release/index.sh <version>` redoes only the page. `release/build.sh` needs `PAI_SIGNING_KEY`, the path to the release key, and signs `SHA256SUMS` with it; `release/SIGNING.md` covers the key, and what Apple and Windows code signing would take.
 
 `cargo test` runs a fake relay with real issuer keys. To run against a real relay started with `PAI_DEV_PAYMENTS=1`:
 
