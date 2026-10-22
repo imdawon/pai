@@ -8,7 +8,7 @@ use serde_json::Value;
 
 fn target(t: &TestEnv, context: u32) -> Target {
     Target {
-        api_url: "https://api.test".into(),
+        base_url: "http://127.0.0.1:47821".into(),
         pai_bin: t.env.pai_bin.to_string_lossy().into_owned(),
         context,
         plan_known: true,
@@ -28,7 +28,7 @@ fn print_mode_writes_nothing() {
     let t = TestEnv::new();
     for tool in [Tool::ClaudeCode, Tool::Codex, Tool::Opencode, Tool::Omp] {
         let out = setup::run(&t.env, tool, &target(&t, 262144), false).unwrap();
-        assert!(out.contains("api.test"), "{out}");
+        assert!(out.contains("127.0.0.1:47821"), "{out}");
     }
     assert!(!t.home().exists());
 }
@@ -57,7 +57,7 @@ fn claude_code_merges_and_backs_up() {
     assert_eq!(v["permissions"]["allow"][0], "Bash(ls)");
     assert_eq!(v["env"]["FOO"], "1");
     assert!(v["env"].get("ANTHROPIC_API_KEY").is_none());
-    assert_eq!(v["env"]["ANTHROPIC_BASE_URL"], "https://api.test");
+    assert_eq!(v["env"]["ANTHROPIC_BASE_URL"], "http://127.0.0.1:47821");
     assert_eq!(v["env"]["ANTHROPIC_MODEL"], "qwen3.8-27b");
     assert_eq!(v["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "65536");
     assert_eq!(v["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], "16384");
@@ -106,7 +106,7 @@ fn codex_adds_provider_and_profile() {
         Some("Other")
     );
     let p = &doc["model_providers"]["privacy-ai"];
-    assert_eq!(p["base_url"].as_str(), Some("https://api.test/v1"));
+    assert_eq!(p["base_url"].as_str(), Some("http://127.0.0.1:47821/v1"));
     assert_eq!(p["wire_api"].as_str(), Some("responses"));
     assert_eq!(p["auth"]["command"].as_str(), Some("/opt/pai/bin/pai"));
     assert_eq!(
@@ -153,7 +153,7 @@ fn opencode_writes_plugin_and_model() {
 
     let plugin = fs::read_to_string(dir.join("plugins").join("privacy-ai.ts")).unwrap();
     assert!(plugin.contains("const DEFAULT_PAI_BIN = \"/opt/pai/bin/pai\"\n"));
-    assert!(plugin.contains("const DEFAULT_API_URL = \"https://api.test\"\n"));
+    assert!(plugin.contains("const DEFAULT_BASE_URL = \"http://127.0.0.1:47821\"\n"));
     assert!(plugin.contains("const CONTEXT_WINDOW = 65536\n"));
     let v: Value =
         serde_json::from_str(&fs::read_to_string(dir.join("opencode.json")).unwrap()).unwrap();

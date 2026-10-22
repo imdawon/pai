@@ -16,6 +16,7 @@ fn paired(relay: &FakeRelay) -> TestEnv {
         Some(&relay.url),
         Some("http://api.test/"),
         Some("test box"),
+        &[],
     )
     .unwrap();
     t
@@ -44,7 +45,7 @@ fn pair_token_cached_token_unpair() {
         assert_eq!(mode & 0o777, 0o600);
     }
 
-    let first = app::token(&t.env, false).unwrap();
+    let first = app::credential(&t.env, false).unwrap();
     let cred = Credential::decode(&first).unwrap();
     assert_eq!(cred.day, today());
     assert_eq!(cred.plan, Plan::Chat);
@@ -52,7 +53,7 @@ fn pair_token_cached_token_unpair() {
     assert_eq!(relay.issued(), 1);
 
     let requests_before = relay.state.lock().unwrap().requests.len();
-    let second = app::token(&t.env, false).unwrap();
+    let second = app::credential(&t.env, false).unwrap();
     assert_eq!(first, second);
     assert_eq!(relay.issued(), 1);
     assert_eq!(
@@ -80,7 +81,7 @@ fn pair_token_cached_token_unpair() {
     assert!(t.env.keystore.get(CREDENTIAL).unwrap().is_none());
     assert!(!t.env.paths.secrets_file.exists());
 
-    let err = app::token(&t.env, false).unwrap_err();
+    let err = app::credential(&t.env, false).unwrap_err();
     assert!(matches!(err, Error::NotPaired));
     assert!(err.to_string().starts_with("not paired"));
 }
@@ -91,19 +92,19 @@ fn yesterdays_credential_is_replaced() {
     let mut t = paired(&relay);
 
     t.env.clock = Clock::Fixed(now_unix() - 86_400);
-    let old = app::token(&t.env, false).unwrap();
+    let old = app::credential(&t.env, false).unwrap();
     assert_eq!(Credential::decode(&old).unwrap().day, today() - 1);
 
     t.env.clock = Clock::System;
-    let new = app::token(&t.env, false).unwrap();
+    let new = app::credential(&t.env, false).unwrap();
     assert_ne!(old, new);
     let cred = Credential::decode(&new).unwrap();
     assert_eq!(cred.day, today());
     cred.verify(issuer_public_key(Plan::Chat, today())).unwrap();
     assert_eq!(relay.issued(), 2);
 
-    assert_eq!(app::token(&t.env, false).unwrap(), new);
-    app::token(&t.env, true).unwrap();
+    assert_eq!(app::credential(&t.env, false).unwrap(), new);
+    app::credential(&t.env, true).unwrap();
     assert_eq!(relay.issued(), 3, "--refresh always fetches");
 }
 
@@ -112,9 +113,9 @@ fn issuance_limit_is_explained() {
     let relay = FakeRelay::start(CODE);
     let t = paired(&relay);
     for _ in 0..3 {
-        app::token(&t.env, true).unwrap();
+        app::credential(&t.env, true).unwrap();
     }
-    let err = app::token(&t.env, true).unwrap_err();
+    let err = app::credential(&t.env, true).unwrap_err();
     assert!(
         matches!(
             err,
@@ -136,7 +137,7 @@ fn replayed_write_is_retried() {
     let relay = FakeRelay::start(CODE);
     let t = paired(&relay);
     relay.state.lock().unwrap().replay_next_write = true;
-    app::token(&t.env, false).unwrap();
+    app::credential(&t.env, false).unwrap();
     let requests = relay.state.lock().unwrap().requests.clone();
     assert_eq!(
         requests
@@ -155,7 +156,7 @@ fn parallel_calls_fetch_once() {
     let t = paired(&relay);
     let tokens: Vec<String> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..6)
-            .map(|_| s.spawn(|| app::token(&t.env, false).unwrap()))
+            .map(|_| s.spawn(|| app::credential(&t.env, false).unwrap()))
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
@@ -168,7 +169,7 @@ fn unpaid_account() {
     let relay = FakeRelay::start(CODE);
     let t = paired(&relay);
     relay.set_unpaid();
-    let err = app::token(&t.env, false).unwrap_err();
+    let err = app::credential(&t.env, false).unwrap_err();
     assert!(matches!(err, Error::NotPaid { .. }), "{err:?}");
     assert_eq!(err.exit_code(), 3);
     let msg = err.to_string();
@@ -190,7 +191,7 @@ fn removed_device() {
     let relay = FakeRelay::start(CODE);
     let t = paired(&relay);
     relay.remove_all_devices();
-    let err = app::token(&t.env, false).unwrap_err();
+    let err = app::credential(&t.env, false).unwrap_err();
     assert!(matches!(err, Error::DeviceRemoved), "{err:?}");
     assert_eq!(err.exit_code(), 4);
     assert!(err.to_string().starts_with("device removed, pair again"));
@@ -211,7 +212,7 @@ fn unreachable_relay_still_unpairs_locally() {
     drop(dead);
     cfg.save(&t.env.paths.config_file()).unwrap();
 
-    let err = app::token(&t.env, false).unwrap_err();
+    let err = app::credential(&t.env, false).unwrap_err();
     assert!(matches!(err, Error::RelayUnreachable(_)), "{err:?}");
     assert!(err.to_string().starts_with("relay unreachable"));
 
@@ -229,18 +230,18 @@ fn pairing_errors() {
     let relay = FakeRelay::start(CODE);
     let t = TestEnv::new();
     assert!(matches!(
-        app::pair(&t.env, "short", Some(&relay.url), None, None),
+        app::pair(&t.env, "short", Some(&relay.url), None, None, &[]),
         Err(Error::BadPairingCode)
     ));
-    let err = app::pair(&t.env, "ZZZZ-ZZZZ", Some(&relay.url), None, None).unwrap_err();
+    let err = app::pair(&t.env, "ZZZZ-ZZZZ", Some(&relay.url), None, None, &[]).unwrap_err();
     assert!(matches!(err, Error::PairingRejected(_)), "{err:?}");
     assert!(t.env.config().unwrap().is_none());
     assert!(t.env.keystore.get(DEVICE_KEY).unwrap().is_none());
 
-    app::pair(&t.env, CODE, Some(&relay.url), None, None).unwrap();
+    app::pair(&t.env, CODE, Some(&relay.url), None, None, &[]).unwrap();
     relay.add_code("ZZZZ0000");
     assert!(matches!(
-        app::pair(&t.env, "ZZZZ0000", Some(&relay.url), None, None),
+        app::pair(&t.env, "ZZZZ0000", Some(&relay.url), None, None, &[]),
         Err(Error::AlreadyPaired)
     ));
 }
@@ -272,22 +273,11 @@ fn tomorrows_credential_is_collected_ahead_and_used_without_a_fetch() {
     // Today, `pai token` uses it and asks the relay for nothing.
     t.env.clock = Clock::System;
     let requests_before = relay.state.lock().unwrap().requests.len();
-    let token = app::token(&t.env, false).unwrap();
+    let token = app::credential(&t.env, false).unwrap();
     assert_eq!(Credential::decode(&token).unwrap().day, today());
     assert_eq!(relay.state.lock().unwrap().requests.len(), requests_before);
     assert_eq!(t.env.keystore.get(CREDENTIAL).unwrap().as_deref().map(String::as_str), Some(token.as_str()));
     assert!(t.env.keystore.get(NEXT_CREDENTIAL).unwrap().is_none());
-}
-
-#[test]
-fn token_starts_the_background_fetch_once_a_day() {
-    let relay = FakeRelay::start(CODE);
-    let mut t = paired(&relay);
-    t.env.prefetch = true;
-    t.env.pai_bin = t.dir.path().join("no-such-pai");
-    app::token(&t.env, false).unwrap();
-    let marker = std::fs::read_to_string(t.env.paths.prefetch_file()).unwrap();
-    assert_eq!(marker.trim(), today().to_string());
 }
 
 #[test]

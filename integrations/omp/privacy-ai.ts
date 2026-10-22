@@ -1,14 +1,16 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 // `pai setup omp --apply` rewrites these three lines for the user's install and plan.
-const DEFAULT_API_URL = "https://api.privacyai.example";
+const DEFAULT_BASE_URL = "http://127.0.0.1:47821";
 const DEFAULT_PAI_BIN = "pai";
 const CONTEXT_WINDOW = 262144;
 
 const PROVIDER_ID = "privacy-ai";
 
-function apiUrl(): string {
-  return (process.env.PAI_API_URL?.trim() || DEFAULT_API_URL).replace(/\/+$/, "");
+// pai's local proxy. It adds the day credential and checks the model API's certificate against
+// pai's pins, so the key OMP holds only works on this machine.
+function baseUrl(): string {
+  return (process.env.PAI_BASE_URL?.trim() || DEFAULT_BASE_URL).replace(/\/+$/, "");
 }
 
 function paiBin(): string {
@@ -22,11 +24,11 @@ function shellQuote(s: string): string {
 
 export default function privacyAi(pi: ExtensionAPI): void {
   pi.registerProvider(PROVIDER_ID, {
-    baseUrl: `${apiUrl()}/v1`,
+    baseUrl: `${baseUrl()}/v1`,
     api: "openai-completions",
-    // A `!command` key keeps the day credential in OMP's memory only (an oauth login would
-    // persist it in agent.db) and needs no /login. OMP caches the output for the process and
-    // re-runs the command after a 401, which is how a session crosses UTC midnight.
+    // `pai token` starts pai's local proxy if needed and prints this machine's key for it. A
+    // `!command` key keeps it in OMP's memory only (an oauth login would persist it in agent.db)
+    // and needs no /login. OMP caches the output for the process and re-runs it after a 401.
     apiKey: `!${shellQuote(paiBin())} token`,
     models: [
       {

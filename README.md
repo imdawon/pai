@@ -1,6 +1,8 @@
 # pai
 
-Lets coding tools use Privacy AI without a long-lived API key. Each tool runs `pai token`, which prints a day credential that expires at UTC midnight and can't be linked to your account. `pai` runs on macOS, Windows and Linux.
+Lets coding tools use Privacy AI without holding any credential. Each tool talks to `pai`'s local proxy at `http://127.0.0.1:47821`, with a key that only works on this machine. The proxy adds a day credential, which expires at UTC midnight and can't be linked to your account, and sends the request to the model API. `pai` runs on macOS, Windows and Linux.
+
+**Why a proxy.** The relay that carries your connection holds the IP address the model API's name points to, so it could get a valid certificate for that name and read what your tool sends. The proxy checks the model API's public key against pins built into `pai`, and refuses to connect to anything else, whatever certificate it shows. Coding tools can't do that check themselves.
 
 The account key never reaches this machine. What `pai` holds is a device key, which can only fetch day credentials, and which you can remove from the web app at any time.
 
@@ -26,13 +28,23 @@ Or paste `skill/privacy-ai/SKILL.md` into your coding agent, and it does all of 
 
 | Command | Does |
 |---|---|
-| `pai pair <code> [--relay URL] [--api URL] [--name NAME]` | Links this machine using the 8-character code from **Connect a device** in the web app. Makes an Ed25519 device key and keeps it in the OS keychain. |
-| `pai token [--refresh]` | Prints today's credential and nothing else. Reuses the cached one, or the one collected yesterday; otherwise collects a new blind-signed one from the relay. Then it starts a background `pai prefetch`, once a day, that waits a random time and collects tomorrow's. |
-| `pai status` | Paired or not, account, plan, device, and whether there's a credential for today. Never prints secrets. |
-| `pai unpair` | Removes the device from your account, then deletes its key, credential and config here, even if the relay can't be reached. |
+| `pai pair <code> [--relay URL] [--api URL] [--name NAME] [--pin PIN]` | Links this machine using the 8-character code from **Connect a device** in the web app. Makes an Ed25519 device key and keeps it in the OS keychain. |
+| `pai token` | What coding tools run. Makes sure there's a credential for today, starts the local proxy if it isn't running (or is from an older `pai`), and prints the local key and nothing else. |
+| `pai proxy` | Runs the local proxy in the foreground. It only answers on 127.0.0.1, only with the local key, and refuses requests from web pages. Once a day, at a random time, it collects tomorrow's credential. |
+| `pai status` | Paired or not, account, plan, device, credentials for today and tomorrow, pins, and whether the proxy is running. Never prints secrets. |
+| `pai unpair` | Stops the proxy, removes the device from your account, then deletes its keys, credentials and config here, even if the relay can't be reached. |
 | `pai setup <claude-code\|codex\|opencode\|omp> [--apply]` | Prints the tool's config. `--apply` writes it and backs up any file it changes to `<file>.pai-backup-<time>`. |
 
 The relay and API default to `https://relay.privacyai.example` and `https://api.privacyai.example`. Override them at pairing with the flags or `PAI_RELAY_URL` / `PAI_API_URL`.
+
+| Variable | Does |
+|---|---|
+| `PAI_PROXY_PORT` | The proxy's port, `47821` by default. Run `pai setup` again after changing it. |
+| `PAI_API_PINS` | Comma-separated pins for the model API's key, replacing the ones built in. For a test box only. |
+| `PAI_API_CA` | A PEM file trusted instead of the public certificate authorities, for a test box with its own certificate. Pins still apply. |
+| `PAI_PREFETCH=0` | Stops the proxy collecting tomorrow's credential ahead. |
+
+A pin is the base64 SHA-256 of the server's public key: `openssl x509 -pubkey -noout -in cert.pem | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | base64`. Releases are built with the box's pins (`PAI_RELEASE_API_PINS` in `release/build.sh`), including a spare key for when the box's key changes. An `http://` API URL, for a local test gateway, skips TLS and pins.
 
 Errors go to stderr. `pai token` exits with 2 when not paired, 3 when the plan isn't paid, 4 when the device was removed, and 5 when the relay is unreachable.
 
@@ -40,10 +52,9 @@ Errors go to stderr. `pai token` exits with 2 when not paired, 3 when the plan i
 
 | What | Where |
 |---|---|
-| Device key, today's credential | OS keychain, service `privacy-ai`: macOS Keychain, Windows Credential Manager, or the Secret Service on Linux |
-| Relay URL, API URL, device ID, account ID | `pai/config.json` in the OS config directory (`~/Library/Application Support`, `%APPDATA%`, `~/.config`) |
+| Device key, today's and tomorrow's credentials, the local proxy key | OS keychain, service `privacy-ai`: macOS Keychain, Windows Credential Manager, or the Secret Service on Linux |
+| Relay URL, API URL, device ID, account ID, any test pins | `pai/config.json` in the OS config directory (`~/Library/Application Support`, `%APPDATA%`, `~/.config`) |
 | Lock that stops parallel `pai token` calls fetching twice | `pai/token.lock` next to the config |
-| The day a background fetch last started | `pai/prefetch-day` next to the config |
 
 On a headless Linux machine without a Secret Service, `pai` stops with an error. Set `PAI_KEYSTORE=file` to keep the secrets in `~/.config/pai/secrets.json` instead, with mode 0600 and no encryption. `PAI_CONFIG_DIR` moves all of these files to one directory.
 
@@ -51,7 +62,7 @@ On a headless Linux machine without a Secret Service, `pai` stops with an error.
 
 ## Coding tools
 
-Run `pai setup <tool>` to see the exact config, with the path to `pai`, your API URL and your plan's context window filled in. `--apply` writes it.
+Run `pai setup <tool>` to see the exact config, with the path to `pai`, the proxy's address and your plan's context window filled in. `--apply` writes it. Every tool talks to the proxy, never to the model API directly.
 
 - **Claude Code**: `~/.claude/settings.json` gets `"apiKeyHelper": "<pai> token"`, `env.ANTHROPIC_BASE_URL`, the model `qwen3.8-27b` for every model alias, the context and output limits, and switches that keep Claude Code from sending traffic to Anthropic. Claude Code reruns the helper every hour and after a 401. An `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_BASE_URL` in the environment Claude Code starts in overrides these settings; `pai setup` warns about them.
 - **Codex**: `~/.codex/config.toml` gets a `[model_providers.privacy-ai]` table using the Responses API, whose `[model_providers.privacy-ai.auth]` runs `pai token`. The model goes in a profile file, `~/.codex/privacy-ai.config.toml`, so start Codex with `codex --profile privacy-ai`.

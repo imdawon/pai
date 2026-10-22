@@ -5,5 +5,7 @@ pub mod app;
 pub mod config;
 pub mod error;
 pub mod keystore;
+pub mod pin;
+pub mod proxy;
 pub mod relay;
 pub mod setup;

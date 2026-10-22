@@ -12,7 +12,7 @@ use zeroize::Zeroizing;
 
 use crate::config::{Config, DEFAULT_API_URL, DEFAULT_RELAY_URL, Paths, trim_url};
 use crate::error::{Error, Result, io_err};
-use crate::keystore::{CREDENTIAL, DEVICE_KEY, Keystore, NEXT_CREDENTIAL};
+use crate::keystore::{CREDENTIAL, DEVICE_KEY, Keystore, NEXT_CREDENTIAL, PROXY_KEY};
 use crate::relay::Relay;
 
 #[derive(Debug, Clone, Copy)]
@@ -41,7 +41,7 @@ pub struct Env {
     pub pai_bin: PathBuf,
     /// Environment variables, captured once.
     pub vars: HashMap<String, String>,
-    /// Whether `pai token` may start a background `pai prefetch`. `PAI_PREFETCH=0` turns it off.
+    /// Whether the proxy collects tomorrow's credential ahead. `PAI_PREFETCH=0` turns it off.
     pub prefetch: bool,
 }
 
@@ -90,7 +90,7 @@ impl Env {
         trim_url(self.var("PAI_API_URL").unwrap_or(DEFAULT_API_URL))
     }
 
-    fn paired(&self) -> Result<Config> {
+    pub fn paired(&self) -> Result<Config> {
         self.config()?.ok_or(Error::NotPaired)
     }
 
@@ -150,6 +150,7 @@ pub fn pair(
     relay_url: Option<&str>,
     api_url: Option<&str>,
     name: Option<&str>,
+    api_pins: &[String],
 ) -> Result<Config> {
     let code = normalize_code(code)?;
     if env.config()?.is_some() {
@@ -183,11 +184,13 @@ pub fn pair(
         api_url,
         device_id: registered.device_id.clone(),
         account_id: registered.account_id,
+        api_pins: api_pins.to_vec(),
     };
     let saved = (|| {
         let seed = Zeroizing::new(b64(key.to_bytes()));
         env.keystore.set(DEVICE_KEY, &seed)?;
         env.keystore.delete(CREDENTIAL)?;
+        env.keystore.delete(NEXT_CREDENTIAL)?;
         config.save(&env.paths.config_file())
     })();
     if let Err(e) = saved {
@@ -230,16 +233,120 @@ fn lock(env: &Env) -> Result<fs::File> {
 }
 
 /// Returns today's credential. It comes from the cache, or from the one collected yesterday in
-/// the background; only when neither is there (or `refresh` is set) is one fetched now. Then it
-/// makes sure tomorrow's will be collected at a random time today.
-pub fn token(env: &Env, refresh: bool) -> Result<String> {
+/// the background; only when neither is there (or `refresh` is set) is one fetched now.
+pub fn credential(env: &Env, refresh: bool) -> Result<String> {
     let config = env.paired()?;
     let today = day_number(env.clock.now());
-    let credential = current_credential(env, &config, today, refresh)?;
-    if env.prefetch {
-        let _ = start_prefetch(env, today);
+    current_credential(env, &config, today, refresh)
+}
+
+/// Pins for the model API's key: `PAI_API_PINS` (comma-separated), then the pairing's, then the
+/// ones this release was built with.
+pub fn api_pins(env: &Env, config: &Config) -> Vec<String> {
+    let list = |s: &str| s.split(',').map(str::trim).filter(|p| !p.is_empty()).map(str::to_string).collect::<Vec<_>>();
+    if let Some(v) = env.var("PAI_API_PINS") {
+        return list(v);
     }
-    Ok(credential)
+    if !config.api_pins.is_empty() {
+        return config.api_pins.clone();
+    }
+    list(option_env!("PAI_RELEASE_API_PINS").unwrap_or(""))
+}
+
+/// This machine's key for the local proxy, made on first use.
+pub fn local_key(env: &Env) -> Result<String> {
+    if let Some(k) = env.keystore.get(PROXY_KEY)? {
+        return Ok(k.to_string());
+    }
+    let mut bytes = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
+    let key = format!("pai-local-{}", b64(bytes));
+    env.keystore.set(PROXY_KEY, &key)?;
+    Ok(key)
+}
+
+fn local_client() -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .expect("a plain HTTP client builds")
+}
+
+/// What the local proxy answers at `/pai/health`: `Some(fingerprint)`, or `None` when nothing
+/// of ours is listening.
+fn proxy_health(env: &Env, key: &str) -> Option<String> {
+    let r = local_client()
+        .get(format!("{}/pai/health", crate::proxy::url(env)))
+        .bearer_auth(key)
+        .send()
+        .ok()?;
+    let v: serde_json::Value = r.json().ok()?;
+    v["pai"].as_str().map(str::to_string)
+}
+
+fn stop_proxy(env: &Env, key: &str) {
+    let _ = local_client().post(format!("{}/pai/stop", crate::proxy::url(env))).bearer_auth(key).send();
+}
+
+/// Makes sure this version of `pai`'s proxy is running with this pairing, starting it if not.
+pub fn ensure_proxy(env: &Env) -> Result<()> {
+    let config = env.paired()?;
+    let key = local_key(env)?;
+    let want = crate::proxy::fingerprint(&config, &api_pins(env, &config));
+    match proxy_health(env, &key) {
+        Some(have) if have == want => return Ok(()),
+        Some(_) => {
+            stop_proxy(env, &key);
+            for _ in 0..30 {
+                if proxy_health(env, &key).is_none() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        None => {}
+    }
+    crate::proxy::upstream_client(env, &config)?;
+
+    let mut cmd = std::process::Command::new(&env.pai_bin);
+    cmd.arg("proxy")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Its own process group, so closing the coding tool doesn't take it down too.
+        cmd.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+    cmd.spawn().map_err(|e| Error::Io(format!("couldn't start pai's local proxy: {e}")))?;
+    for _ in 0..50 {
+        if proxy_health(env, &key).as_deref() == Some(want.as_str()) {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(Error::Io(format!(
+        "pai's local proxy didn't start on 127.0.0.1:{}. Run `pai proxy` to see why, or set PAI_PROXY_PORT if that port is taken",
+        crate::proxy::port(env)
+    )))
+}
+
+/// What coding tools run: checks there's a credential for today (so an unpaid plan or a removed
+/// device shows up when the tool starts), makes sure the proxy is up, and prints this machine's
+/// local key. The credential itself never leaves `pai`.
+pub fn token(env: &Env) -> Result<String> {
+    credential(env, false)?;
+    ensure_proxy(env)?;
+    local_key(env)
 }
 
 fn current_credential(env: &Env, config: &Config, today: u32, refresh: bool) -> Result<String> {
@@ -310,41 +417,6 @@ fn fetch_credential(env: &Env, config: &Config, day: u32) -> Result<String> {
 /// Leave this much of the day unused, so a late fetch still lands before midnight.
 const PREFETCH_MARGIN_SECS: i64 = 15 * 60;
 
-/// Starts `pai prefetch` in the background, once a day, unless tomorrow's credential is already
-/// here. It runs detached, so the coding tool that ran `pai token` doesn't wait for it.
-fn start_prefetch(env: &Env, today: u32) -> Result<()> {
-    if stored_credential(env, NEXT_CREDENTIAL, today + 1)?.is_some() {
-        return Ok(());
-    }
-    let marker = env.paths.prefetch_file();
-    if fs::read_to_string(&marker).ok().and_then(|s| s.trim().parse::<u32>().ok()) == Some(today) {
-        return Ok(());
-    }
-    fs::create_dir_all(&env.paths.config_dir).map_err(|e| io_err("create", &env.paths.config_dir, e))?;
-    fs::write(&marker, today.to_string()).map_err(|e| io_err("write", &marker, e))?;
-
-    let mut cmd = std::process::Command::new(&env.pai_bin);
-    cmd.args(["prefetch", "--day", &(today + 1).to_string()])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        // Its own process group, so closing the coding tool doesn't take it down too.
-        cmd.process_group(0);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-    }
-    cmd.spawn().map_err(|e| Error::Io(format!("couldn't start the background fetch: {e}")))?;
-    Ok(())
-}
-
 /// A uniformly random wait between now and shortly before the end of the UTC day, or `None`
 /// when the day is nearly over.
 pub fn prefetch_delay(now: i64) -> Option<Duration> {
@@ -357,9 +429,9 @@ pub fn prefetch_delay(now: i64) -> Option<Duration> {
 
 const DAY_SECS: i64 = 86_400;
 
-/// Collects the credential for `day` (tomorrow) and keeps it for `pai token` to use then. Run in
-/// the background by `pai token` after `delay`, so the time it's fetched, which the relay sees,
-/// says nothing about when it's used.
+/// Collects the credential for `day` (tomorrow) and keeps it for the next day. The proxy runs it
+/// at a random time, so the time it's fetched, which the relay sees, says nothing about when
+/// it's used.
 pub fn prefetch(env: &Env, day: u32, delay: Duration) -> Result<bool> {
     if day_number(env.clock.now()) + 1 != day {
         return Ok(false);
@@ -384,6 +456,8 @@ pub struct Status {
     pub plan: String,
     pub credential_today: bool,
     pub credential_tomorrow: bool,
+    pub proxy: String,
+    pub pins: usize,
     pub keystore: String,
 }
 
@@ -396,6 +470,8 @@ pub fn status(env: &Env) -> Result<Status> {
             plan: "-".into(),
             credential_today: false,
             credential_tomorrow: false,
+            proxy: "-".into(),
+            pins: 0,
             keystore,
         });
     };
@@ -426,6 +502,11 @@ pub fn status(env: &Env) -> Result<Status> {
         plan,
         credential_today,
         credential_tomorrow,
+        proxy: match env.keystore.get(PROXY_KEY).ok().flatten().and_then(|k| proxy_health(env, &k)) {
+            Some(_) => format!("running at {}", crate::proxy::url(env)),
+            None => format!("not running (coding tools start it with `pai token`); {}", crate::proxy::url(env)),
+        },
+        pins: api_pins(env, &cfg).len(),
         keystore,
     })
 }
@@ -452,6 +533,12 @@ impl std::fmt::Display for Status {
         )?;
         writeln!(f, "Relay:      {}", c.relay_url)?;
         writeln!(f, "API:        {}", c.api_url)?;
+        if c.api_url.starts_with("https://") {
+            writeln!(f, "Pins:       {}", if self.pins == 0 { "none, so the proxy won't connect".to_string() } else { format!("{} for the API's key", self.pins) })?;
+        } else {
+            writeln!(f, "Pins:       none needed (plain HTTP test gateway; nothing is encrypted)")?;
+        }
+        writeln!(f, "Proxy:      {}", self.proxy)?;
         writeln!(f, "Keystore:   {}", self.keystore)
     }
 }
@@ -485,10 +572,14 @@ pub fn unpair(env: &Env) -> Result<Vec<String>> {
         }
         _ => notes.push("The pairing was incomplete; removing what's left of it.".into()),
     }
+    if let Ok(Some(k)) = env.keystore.get(PROXY_KEY) {
+        stop_proxy(env, &k);
+    }
     env.keystore.delete(DEVICE_KEY)?;
     env.keystore.delete(CREDENTIAL)?;
     env.keystore.delete(NEXT_CREDENTIAL)?;
-    for path in [env.paths.config_file(), env.paths.lock_file(), env.paths.prefetch_file()] {
+    env.keystore.delete(PROXY_KEY)?;
+    for path in [env.paths.config_file(), env.paths.lock_file()] {
         match fs::remove_file(&path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

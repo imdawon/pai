@@ -15,6 +15,9 @@ pub struct Config {
     pub api_url: String,
     pub device_id: String,
     pub account_id: String,
+    /// Pins for the model API's key, for a test box. Releases carry their own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_pins: Vec<String>,
 }
 
 impl Config {
@@ -63,11 +66,6 @@ impl Paths {
 
     pub fn lock_file(&self) -> PathBuf {
         self.config_dir.join("token.lock")
-    }
-
-    /// The UTC day for which a background fetch of the next day's credential was last started.
-    pub fn prefetch_file(&self) -> PathBuf {
-        self.config_dir.join("prefetch-day")
     }
 
     pub fn from_env() -> Result<Paths> {

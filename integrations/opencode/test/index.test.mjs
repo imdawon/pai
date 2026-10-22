@@ -23,16 +23,16 @@ function withPaiBin(t, bin) {
   })
 }
 
-test("adds the bearer credential and retries once with a fresh one on 401", async (t) => {
+test("adds the local key and asks pai again once on 401", async (t) => {
   withPaiBin(
     t,
-    fakePai(t, 'n=$(cat "$DIR/n" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$DIR/n"; echo "pai1.tok$n"'),
+    fakePai(t, 'n=$(cat "$DIR/n" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$DIR/n"; echo "pai-local-tok$n"'),
   )
   const seen = []
   const baseFetch = async (_url, init) => {
     const auth = new Headers(init.headers).get("authorization")
     seen.push(auth)
-    if (auth === "Bearer pai1.tok1") {
+    if (auth === "Bearer pai-local-tok1") {
       return new Response(JSON.stringify({ error: { type: "invalid_credential" } }), { status: 401 })
     }
     return new Response("{}", { status: 200 })
@@ -46,10 +46,10 @@ test("adds the bearer credential and retries once with a fresh one on 401", asyn
   })
 
   assert.equal(res.status, 200)
-  assert.deepEqual(seen, ["Bearer pai1.tok1", "Bearer pai1.tok2"])
+  assert.deepEqual(seen, ["Bearer pai-local-tok1", "Bearer pai-local-tok2"])
 
   await paiFetch("https://api.example/v1/chat/completions", { method: "POST", body: "{}" })
-  assert.equal(seen.at(-1), "Bearer pai1.tok2", "cached credential is reused")
+  assert.equal(seen.at(-1), "Bearer pai-local-tok2", "the key is reused")
 })
 
 test("surfaces pai's stderr when it fails", async (t) => {
@@ -57,7 +57,28 @@ test("surfaces pai's stderr when it fails", async (t) => {
   await assert.rejects(createCredentialSource().get(), /not paired/)
 })
 
-test("base URL honours PAI_API_URL", () => {
-  assert.equal(defaultBaseURL({}), "https://api.privacyai.example/v1")
-  assert.equal(defaultBaseURL({ PAI_API_URL: "http://localhost:8080/" }), "http://localhost:8080/v1")
+test("asks pai again once when the proxy can't be reached", async (t) => {
+  withPaiBin(
+    t,
+    fakePai(t, 'n=$(cat "$DIR/n" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$DIR/n"; echo "pai-local-k$n"'),
+  )
+  let calls = 0
+  const baseFetch = async () => {
+    calls++
+    if (calls === 1) throw new TypeError("fetch failed")
+    return new Response("{}", { status: 200 })
+  }
+  const res = await createPaiFetch(createCredentialSource(), baseFetch)("http://127.0.0.1:47821/v1/models", {})
+  assert.equal(res.status, 200)
+  assert.equal(calls, 2)
+})
+
+test("refuses output that isn't a local key", async (t) => {
+  withPaiBin(t, fakePai(t, 'echo "pai1.a-day-credential"'))
+  await assert.rejects(createCredentialSource().get(), /isn't pai's local key/)
+})
+
+test("base URL is pai's local proxy, or PAI_BASE_URL", () => {
+  assert.equal(defaultBaseURL({}), "http://127.0.0.1:47821/v1")
+  assert.equal(defaultBaseURL({ PAI_BASE_URL: "http://127.0.0.1:9999/" }), "http://127.0.0.1:9999/v1")
 })

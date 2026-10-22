@@ -12,6 +12,8 @@ pub const DEVICE_KEY: &str = "device-key";
 pub const CREDENTIAL: &str = "day-credential";
 /// Tomorrow's credential, collected ahead at a random time.
 pub const NEXT_CREDENTIAL: &str = "next-day-credential";
+/// The key coding tools send to the local proxy. It only works on this machine.
+pub const PROXY_KEY: &str = "local-proxy-key";
 
 /// Holds the device key and the cached day credential.
 #[derive(Debug, Clone)]

@@ -20,6 +20,12 @@ out="$dist/$version"
 rm -rf "$out"
 mkdir -p "$out"
 
+# The model API's key pins, compiled into pai: base64 SHA-256 of each public key, comma-separated.
+# List the box's current key and a spare one kept offline, so the box can switch keys without
+# breaking every installed pai. See pai-gateway/deploy/CERTIFICATES.md.
+: "${PAI_RELEASE_API_PINS:?set PAI_RELEASE_API_PINS to the model API key pins (current,spare)}"
+export PAI_RELEASE_API_PINS
+
 # pai-proto is a path dependency on ../pai-relay, so the containers need both checkouts.
 relay="$(cd "$root/../pai-relay" && pwd)"
 
@@ -39,7 +45,7 @@ for arch in aarch64 x86_64; do
 	docker run --rm --platform "$platform" \
 		-v "$root:/src/pai:ro" -v "$relay:/src/pai-relay:ro" -v "$out:/out" \
 		-v "pai-cargo-registry-$arch:/usr/local/cargo/registry" -v "pai-target-linux-$arch:/target" \
-		-e CARGO_TARGET_DIR=/target -w /src/pai "$RUST_ALPINE" \
+		-e CARGO_TARGET_DIR=/target -e PAI_RELEASE_API_PINS -w /src/pai "$RUST_ALPINE" \
 		sh -euc "apk add --no-cache musl-dev >/dev/null
 			cargo build --release --locked --target $target
 			cp /target/$target/release/pai /out/pai-$target"
@@ -53,7 +59,7 @@ for target in x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
 		-v "$root:/src/pai:ro" -v "$relay:/src/pai-relay:ro" -v "$out:/out" \
 		-v pai-xwin-cache:/root/.cache/cargo-xwin -v pai-cargo-registry-xwin:/usr/local/cargo/registry \
 		-v pai-target-xwin:/target \
-		-e CARGO_TARGET_DIR=/target -e RUSTFLAGS="-C target-feature=+crt-static" -w /src/pai "$CARGO_XWIN" \
+		-e CARGO_TARGET_DIR=/target -e PAI_RELEASE_API_PINS -e RUSTFLAGS="-C target-feature=+crt-static" -w /src/pai "$CARGO_XWIN" \
 		sh -euc "cargo xwin build --cross-compiler clang --release --locked --target $target
 			cp /target/$target/release/pai.exe /out/pai-$target.exe"
 done

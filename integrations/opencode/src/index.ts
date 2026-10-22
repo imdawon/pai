@@ -4,15 +4,17 @@ import type { Plugin, PluginModule } from "@opencode-ai/plugin"
 export const PROVIDER_ID = "privacy-ai"
 export const MODEL_ID = "qwen3.8-27b"
 // `pai setup opencode --apply` rewrites these three lines for the user's install and plan.
-const DEFAULT_API_URL = "https://api.privacyai.example"
+const DEFAULT_BASE_URL = "http://127.0.0.1:47821"
 const DEFAULT_PAI_BIN = "pai"
 const CONTEXT_WINDOW = 262144
 
 type Fetch = typeof globalThis.fetch
 
+// pai's local proxy. It adds the day credential and checks the model API's certificate against
+// pai's pins, so the key this plugin holds only works on this machine.
 export function defaultBaseURL(env: NodeJS.ProcessEnv = process.env): string {
-  const api = (env.PAI_API_URL?.trim() || DEFAULT_API_URL).replace(/\/+$/, "")
-  return api.endsWith("/v1") ? api : `${api}/v1`
+  const base = (env.PAI_BASE_URL?.trim() || DEFAULT_BASE_URL).replace(/\/+$/, "")
+  return base.endsWith("/v1") ? base : `${base}/v1`
 }
 
 function runPaiToken(bin: string): Promise<string> {
@@ -28,20 +30,15 @@ function runPaiToken(bin: string): Promise<string> {
         reject(new Error(`Privacy AI: \`pai token\` failed: ${detail}`))
         return
       }
-      const credential = String(stdout).trim()
-      // Never echo stdout here: if it is a credential in an unexpected shape it must not reach logs.
-      if (!credential.startsWith("pai1.") || /\s/.test(credential)) {
-        reject(new Error("Privacy AI: `pai token` printed something that is not a pai1 credential."))
+      const key = String(stdout).trim()
+      // Never echo stdout here: if it is a secret in an unexpected shape it must not reach logs.
+      if (!key.startsWith("pai-local-") || /\s/.test(key)) {
+        reject(new Error("Privacy AI: `pai token` printed something that isn't pai's local key. Update pai."))
         return
       }
-      resolve(credential)
+      resolve(key)
     })
   })
-}
-
-function nextUtcMidnight(now: number): number {
-  const d = new Date(now)
-  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1)
 }
 
 export type CredentialSource = {
@@ -49,20 +46,21 @@ export type CredentialSource = {
   invalidate(stale: string): void
 }
 
-export function createCredentialSource(options: { bin?: string; now?: () => number } = {}): CredentialSource {
-  const now = options.now ?? Date.now
-  let cached: { value: string; expires: number } | undefined
+// `pai token` starts pai's local proxy if it isn't running and prints this machine's key for it.
+// The key doesn't expire; it's fetched again after a 401, or when the proxy can't be reached.
+export function createCredentialSource(options: { bin?: string } = {}): CredentialSource {
+  let cached: { value: string } | undefined
   let pending: Promise<string> | undefined
 
   return {
     get() {
-      if (cached && now() < cached.expires) return Promise.resolve(cached.value)
+      if (cached) return Promise.resolve(cached.value)
       if (pending) return pending
       const bin = options.bin ?? (process.env.PAI_BIN?.trim() || DEFAULT_PAI_BIN)
       // Single-flight: a burst of requests (title generation, subagents) should spawn pai once.
       pending = runPaiToken(bin)
         .then((value) => {
-          cached = { value, expires: nextUtcMidnight(now()) }
+          cached = { value }
           return value
         })
         .finally(() => {
@@ -87,9 +85,18 @@ export function createPaiFetch(credentials: CredentialSource, baseFetch: Fetch =
     }
 
     const credential = await credentials.get()
-    const response = await send(credential)
     // A Request body is a one-shot stream; the AI SDK sends string bodies via init, which can be replayed.
-    if (response.status !== 401 || input instanceof Request) return response
+    const replayable = !(input instanceof Request)
+    let response: Response
+    try {
+      response = await send(credential)
+    } catch (e) {
+      // The proxy isn't running (the machine restarted, or pai was updated): `pai token` starts it.
+      if (!replayable) throw e
+      credentials.invalidate(credential)
+      return send(await credentials.get())
+    }
+    if (response.status !== 401 || !replayable) return response
 
     await response.body?.cancel().catch(() => {})
     credentials.invalidate(credential)

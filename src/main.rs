@@ -6,7 +6,7 @@ use pai::app::{self, Env};
 use pai::error::Error;
 use pai::setup::{self, Tool};
 
-/// Gives coding tools a Privacy AI day credential, so they never hold a long-lived API key.
+/// Connects coding tools to Privacy AI through a local proxy, so they never hold a credential.
 #[derive(Parser)]
 #[command(name = "pai", version)]
 struct Cli {
@@ -29,22 +29,17 @@ enum Command {
         /// Name shown in the web app's device list [default: pai on <hostname>]
         #[arg(long)]
         name: Option<String>,
+        /// Pin for a test box's API key (base64 SHA-256 of its public key). Releases carry their own
+        #[arg(long = "pin")]
+        pins: Vec<String>,
     },
-    /// Print today's credential (fetching a new one if needed). Coding tools run this.
-    Token {
-        /// Fetch a new credential even if today's is cached
-        #[arg(long)]
-        refresh: bool,
-    },
+    /// Start the local proxy if needed and print this machine's key for it. Coding tools run this.
+    Token,
+    /// Run the local proxy in the foreground. `pai token` starts it in the background.
+    Proxy,
     /// Show whether this machine is paired, and the plan. Never prints secrets.
     Status,
-    /// Collect tomorrow's credential after a random wait. `pai token` starts this in the background.
-    #[command(hide = true)]
-    Prefetch {
-        /// The UTC day to collect for: tomorrow
-        #[arg(long)]
-        day: u32,
-    },
+
     /// Remove this device from the account and delete its key and config
     Unpair,
     /// Print the config a coding tool needs, or write it with --apply
@@ -76,6 +71,7 @@ fn run(command: Command) -> Result<(), Error> {
             relay,
             api,
             name,
+            pins,
         } => {
             let cfg = app::pair(
                 &env,
@@ -83,6 +79,7 @@ fn run(command: Command) -> Result<(), Error> {
                 relay.as_deref(),
                 api.as_deref(),
                 name.as_deref(),
+                &pins,
             )?;
             println!(
                 "Paired. Account {}, device {}.",
@@ -90,19 +87,16 @@ fn run(command: Command) -> Result<(), Error> {
             );
             println!("Next: `pai setup <claude-code|codex|opencode|omp> --apply`.");
         }
-        Command::Token { refresh } => {
-            let credential = app::token(&env, refresh)?;
+        Command::Token => {
+            let key = app::token(&env)?;
             let mut out = std::io::stdout().lock();
-            writeln!(out, "{credential}")
+            writeln!(out, "{key}")
                 .and_then(|_| out.flush())
-                .map_err(|e| Error::Io(format!("couldn't write the credential: {e}")))?;
+                .map_err(|e| Error::Io(format!("couldn't write the key: {e}")))?;
         }
+        Command::Proxy => pai::proxy::run(env)?,
         Command::Status => print!("{}", app::status(&env)?),
-        Command::Prefetch { day } => {
-            if let Some(delay) = app::prefetch_delay(env.clock.now()) {
-                app::prefetch(&env, day, delay)?;
-            }
-        }
+
         Command::Unpair => {
             for line in app::unpair(&env)? {
                 println!("{line}");

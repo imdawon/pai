@@ -22,7 +22,8 @@ pub enum Tool {
 
 /// What every tool's config is built from.
 pub struct Target {
-    pub api_url: String,
+    /// pai's local proxy, which every tool talks to.
+    pub base_url: String,
     pub pai_bin: String,
     pub context: u32,
     pub plan_known: bool,
@@ -30,18 +31,13 @@ pub struct Target {
 
 impl Target {
     pub fn resolve(env: &Env, plan: Option<Plan>) -> Target {
-        let api_url = env
-            .config()
-            .ok()
-            .flatten()
-            .map(|c| c.api_url)
-            .unwrap_or_else(|| env.default_api_url());
+        let base_url = crate::proxy::url(env);
         let context = match plan {
             Some(p) => p.max_context() as u32,
             None => Plan::Chat.max_context() as u32,
         };
         Target {
-            api_url,
+            base_url,
             pai_bin: env.pai_bin.to_string_lossy().into_owned(),
             context,
             plan_known: plan.is_some(),
@@ -150,7 +146,7 @@ fn toml_str(s: &str) -> String {
 }
 
 fn js_rewrite(source: &str, target: &Target) -> String {
-    let api = serde_json::to_string(&target.api_url).expect("string serializes");
+    let base = serde_json::to_string(&target.base_url).expect("string serializes");
     let bin = serde_json::to_string(&target.pai_bin).expect("string serializes");
     source
         .lines()
@@ -160,8 +156,8 @@ fn js_rewrite(source: &str, target: &Target) -> String {
             } else {
                 ""
             };
-            if line.starts_with("const DEFAULT_API_URL = ") {
-                format!("const DEFAULT_API_URL = {api}{semi}")
+            if line.starts_with("const DEFAULT_BASE_URL = ") {
+                format!("const DEFAULT_BASE_URL = {base}{semi}")
             } else if line.starts_with("const DEFAULT_PAI_BIN = ") {
                 format!("const DEFAULT_PAI_BIN = {bin}{semi}")
             } else if line.starts_with("const CONTEXT_WINDOW = ") {
@@ -195,7 +191,7 @@ fn claude_settings(t: &Target) -> Value {
         "apiKeyHelper": format!("{} token", shell_word(&t.pai_bin)),
         "skipWebFetchPreflight": true,
         "env": {
-            "ANTHROPIC_BASE_URL": t.api_url,
+            "ANTHROPIC_BASE_URL": t.base_url,
             "ANTHROPIC_MODEL": MODEL,
             "ANTHROPIC_DEFAULT_FABLE_MODEL": MODEL,
             "ANTHROPIC_DEFAULT_OPUS_MODEL": MODEL,
@@ -230,7 +226,7 @@ fn claude_warnings(env: &Env, t: &Target) -> String {
     // Claude Code ignores env.ANTHROPIC_BASE_URL from settings when its launch environment sets one.
     if let Some(url) = env
         .var("ANTHROPIC_BASE_URL")
-        .filter(|u| crate::config::trim_url(u) != t.api_url)
+        .filter(|u| crate::config::trim_url(u) != t.base_url)
     {
         out.push_str(&format!(
             "\nWarning: ANTHROPIC_BASE_URL={url} is set in the environment Claude Code starts in, and it wins over \
@@ -243,7 +239,7 @@ fn claude_warnings(env: &Env, t: &Target) -> String {
 fn claude_print(env: &Env, t: &Target) -> String {
     format!(
         "Merge into {}:\n\n{}\nRun `pai setup claude-code --apply` to write it. Claude Code runs `pai token` \
-         at startup, every hour, and after a 401.\n{}",
+         at startup, every hour, and after a 401; it starts pai's local proxy and prints the key for it.\n{}",
         claude_settings_path(env).display(),
         pretty(&claude_settings(t)),
         claude_warnings(env, t)
@@ -316,7 +312,7 @@ fn codex_provider_toml(t: &Target) -> String {
          args = [\"token\"]\n\
          timeout_ms = 30000\n\
          refresh_interval_ms = 3600000\n",
-        toml_str(&format!("{}/v1", t.api_url)),
+        toml_str(&format!("{}/v1", t.base_url)),
         toml_str(&t.pai_bin),
     )
 }
@@ -420,11 +416,11 @@ fn opencode_print(env: &Env, t: &Target) -> String {
     let dir = opencode_dir(env);
     format!(
         "Plugin: {} (written by --apply; OpenCode loads every file in plugins/)\n\
-         It runs `{} token` for each new credential and talks to {}/v1.\n\n\
+         It runs `{} token` to start pai's local proxy, and talks to it at {}/v1.\n\n\
          Set in {}:\n\n{}\nRun `pai setup opencode --apply` to write both, then restart OpenCode.\n",
         dir.join("plugins").join("privacy-ai.ts").display(),
         t.pai_bin,
-        t.api_url,
+        t.base_url,
         dir.join("opencode.json").display(),
         pretty(&json!({ "model": format!("{PROVIDER_ID}/{MODEL}") })),
     )
@@ -473,11 +469,11 @@ fn omp_extension_path(env: &Env) -> PathBuf {
 fn omp_print(env: &Env, t: &Target) -> String {
     format!(
         "Extension: {} (written by --apply)\n\
-         It registers the {PROVIDER_ID} provider at {}/v1 with the key command `{} token`.\n\n\
+         It registers the {PROVIDER_ID} provider at pai's local proxy, {}/v1, with the key command `{} token`.\n\n\
          Run `pai setup omp --apply` to write it, restart OMP, and pick {PROVIDER_ID}/{MODEL} with /model \
          (or start `omp --model {PROVIDER_ID}/{MODEL}`).\n",
         omp_extension_path(env).display(),
-        t.api_url,
+        t.base_url,
         t.pai_bin,
     )
 }
@@ -502,7 +498,7 @@ mod tests {
 
     fn target() -> Target {
         Target {
-            api_url: "https://api.test".into(),
+            base_url: "http://127.0.0.1:47821".into(),
             pai_bin: "/opt/pai bin/pai".into(),
             context: 65536,
             plan_known: true,
@@ -515,7 +511,7 @@ mod tests {
             let out = js_rewrite(src, &target());
             assert!(
                 out.contains(&format!(
-                    "const DEFAULT_API_URL = \"https://api.test\"{semi}\n"
+                    "const DEFAULT_BASE_URL = \"http://127.0.0.1:47821\"{semi}\n"
                 )),
                 "{out}"
             );

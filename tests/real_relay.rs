@@ -112,23 +112,23 @@ fn against_real_relay() {
         .unwrap()
         .to_string();
     let spaced = format!("{}-{}", &code[..4], &code[4..]).to_lowercase();
-    app::pair(&t.env, &spaced, Some(&relay), None, None).unwrap();
+    app::pair(&t.env, &spaced, Some(&relay), None, None, &[]).unwrap();
 
-    let err = app::token(&t.env, false).unwrap_err();
+    let err = app::credential(&t.env, false).unwrap_err();
     assert!(matches!(err, Error::NotPaid { .. }), "{err:?}");
 
     browser.call("POST", "/v1/dev/pay", Some(json!({"plan": "agent"})));
-    let first = app::token(&t.env, false).unwrap();
+    let first = app::credential(&t.env, false).unwrap();
     assert_eq!(
         Credential::decode(&first).unwrap().plan,
         pai_proto::Plan::Agent
     );
-    assert_eq!(app::token(&t.env, false).unwrap(), first);
+    assert_eq!(app::credential(&t.env, false).unwrap(), first);
     assert!(app::status(&t.env).unwrap().plan.starts_with("agent"));
 
-    app::token(&t.env, true).unwrap();
-    app::token(&t.env, true).unwrap();
-    let err = app::token(&t.env, true).unwrap_err();
+    app::credential(&t.env, true).unwrap();
+    app::credential(&t.env, true).unwrap();
+    let err = app::credential(&t.env, true).unwrap_err();
     assert!(
         matches!(
             err,
@@ -156,7 +156,7 @@ fn against_real_relay() {
     assert!(err.contains("device removed"), "{err}");
     cfg.relay_url = relay.clone();
     t.env.keystore.delete(pai::keystore::CREDENTIAL).unwrap();
-    let err = app::token(&t.env, false).unwrap_err();
+    let err = app::credential(&t.env, false).unwrap_err();
     assert!(matches!(err, Error::DeviceRemoved), "{err:?}");
 
     let notes = app::unpair(&t.env).unwrap();
@@ -166,8 +166,8 @@ fn against_real_relay() {
         .as_str()
         .unwrap()
         .to_string();
-    app::pair(&t.env, &code, Some(&relay), None, None).unwrap();
-    app::token(&t.env, false).unwrap();
+    app::pair(&t.env, &code, Some(&relay), None, None, &[]).unwrap();
+    app::credential(&t.env, false).unwrap();
     let notes = app::unpair(&t.env).unwrap();
     assert!(notes[0].contains("Removed this device"), "{notes:?}");
 }
