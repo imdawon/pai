@@ -9,6 +9,14 @@ use serde::de::DeserializeOwned;
 
 use crate::error::{Error, Result};
 
+fn innermost(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut cause: &dyn std::error::Error = e;
+    while let Some(next) = cause.source() {
+        cause = next;
+    }
+    cause.to_string()
+}
+
 pub struct Relay {
     base: String,
     client: Client,
@@ -94,8 +102,15 @@ impl Relay {
                 .body(body.to_vec());
         }
         let resp = req.send().map_err(|e| {
-            if e.is_connect() || e.is_timeout() || e.is_request() {
-                Error::RelayUnreachable(self.base.clone())
+            let cause = innermost(&e);
+            if cause.contains("certificate") || cause.contains("UnknownIssuer") {
+                Error::Setup(format!(
+                    "the relay at {} showed a certificate pai doesn't trust ({cause}), so pai sent nothing. \
+                     Check the relay address, and your network",
+                    self.base
+                ))
+            } else if e.is_connect() || e.is_timeout() || e.is_request() {
+                Error::RelayUnreachable(format!("{} ({cause})", self.base))
             } else {
                 Error::Io(format!("request to the relay failed: {e}"))
             }
