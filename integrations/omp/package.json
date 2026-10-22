@@ -1,0 +1,19 @@
+{
+  "name": "omp-privacy-ai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "oh-my-pi (OMP) extension for Privacy AI: registers the privacy-ai provider and authenticates with `pai token`",
+  "license": "MIT",
+  "type": "module",
+  "omp": {
+    "extensions": ["./privacy-ai.ts"]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@oh-my-pi/pi-coding-agent": "18.11.0",
+    "@types/node": "26.6.5",
+    "typescript": "7.0.2"
+  }
+}
