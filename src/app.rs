@@ -617,6 +617,17 @@ pub fn prefetch(env: &Env, plan: Plan, target: u32, delay: Duration) -> Result<b
     Ok(true)
 }
 
+/// The plan as DawonAI names it to users.
+fn plan_label(id: &str) -> &str {
+    match id {
+        "day" => "1-day trial",
+        "chat" => "Chat, monthly",
+        "chat3" => "Chat, 3 months",
+        "agent" => "Agent",
+        other => other,
+    }
+}
+
 pub struct Status {
     pub config: Option<Config>,
     pub plan: String,
@@ -661,8 +672,8 @@ pub fn status(env: &Env) -> Result<Status> {
             .and_then(|r| r.account(&key, &cfg.device_id))
         {
             Ok(a) => match (&a.plan, a.credential_plan) {
-                (Some(p), Some(_)) => format!("{p} ({})", a.status),
-                (Some(p), None) => format!("{p} ({}, not paid)", a.status),
+                (Some(p), Some(_)) => format!("{} ({})", plan_label(p), a.status),
+                (Some(p), None) => format!("{} ({}, not paid)", plan_label(p), a.status),
                 (None, _) => format!("none ({})", a.status),
             },
             Err(Error::DeviceRemoved) => {
