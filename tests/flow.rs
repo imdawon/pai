@@ -215,7 +215,7 @@ fn removed_device() {
 
     // The web app opens once, and the day is noted so it doesn't open again today.
     assert_eq!(opened(&t).len(), 1);
-    assert!(opened(&t)[0].ends_with(" https://app.privacyai.example/"), "{:?}", opened(&t));
+    assert!(opened(&t)[0].ends_with(" https://app.privacyai.example/#account"), "{:?}", opened(&t));
     let marker = std::fs::read_to_string(t.env.paths.web_app_opened_file()).unwrap();
     assert_eq!(marker, today().to_string());
     app::credential(&t.env, false).unwrap_err();
