@@ -46,7 +46,7 @@ impl fmt::Display for Error {
         match self {
             Error::NotPaired => write!(
                 f,
-                "not paired: open Connect a device in the DawonAI web app, then run `pai pair <code>`"
+                "not paired: open Account > Set up a coding tool in the DawonAI web app, then run `pai pair <code>`"
             ),
             Error::AlreadyPaired => {
                 write!(
@@ -56,11 +56,11 @@ impl fmt::Display for Error {
             }
             Error::BadPairingCode => write!(
                 f,
-                "that doesn't look like a pairing code: it's 8 letters and digits, shown under Connect a device"
+                "that doesn't look like a pairing code: it's 8 letters and digits, shown in the DawonAI web app under Account > Set up a coding tool"
             ),
             Error::PairingRejected(msg) => write!(
                 f,
-                "pairing failed: {}. Pairing codes work once and expire after 10 minutes; get a new one from Connect a device",
+                "pairing failed: {}. Pairing codes work once and expire after 10 minutes; get a new one from Account > Set up a coding tool",
                 clause(msg)
             ),
             Error::NotPaid { detail } => write!(

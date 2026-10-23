@@ -43,13 +43,13 @@ Windows (PowerShell):
 irm https://privacyai.example/pai/install.ps1 -OutFile $env:TEMP\pai-install.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\pai-install.ps1
 ```
 
-The installer checks the signature on the release's checksums with the pai release key, checks the download against its SHA-256 checksum, and puts `pai` in `~/.local/bin` (Windows: `%LOCALAPPDATA%\pai`). If it says it can't check the signature, it needs OpenSSL 3 or OpenSSH 8.1 or later: install one, or ask the user before setting `PAI_SKIP_SIGNATURE_CHECK=1`. If it says the signature doesn't match, stop and tell the user. If `pai` isn't found afterwards, run it by its full path for the rest of these steps.
+The installer checks the signature on the release's checksums with the pai release key, checks the download against its SHA-256 checksum, and puts `pai` in `~/.local/bin` (Windows: `%LOCALAPPDATA%\pai`). If it warns that it can't check the signature, tell the user: the install used only the checksum. If it says the signature doesn't match, stop and tell the user. If `pai` isn't found afterwards, run it by its full path for the rest of these steps.
 
 ### 2. Pair this machine
 
 If you don't have a pairing code yet, ask the user:
 
-> Open the DawonAI web app, go to **Connect a device**, and tell me the 8-character code it shows.
+> Open the DawonAI web app, go to **Account > Set up a coding tool**, and tell me the 8-character code it shows.
 
 Wait for their answer. Don't guess or reuse an old code. Then run:
 

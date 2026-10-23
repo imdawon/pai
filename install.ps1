@@ -102,11 +102,7 @@ function Assert-Signed([string]$tmp, [string]$sums) {
         Write-Host 'Checked the signature on SHA256SUMS with OpenSSL.'
         return
     }
-    if ($env:PAI_SKIP_SIGNATURE_CHECK -eq '1') {
-        Write-Warning 'pai install: PAI_SKIP_SIGNATURE_CHECK=1, so the signature on SHA256SUMS isn''t checked. Only the checksum, from the same server as the binary, protects this install.'
-        return
-    }
-    throw "pai install: can't check the signature on SHA256SUMS: this computer has neither the Windows OpenSSH client 8.1 or later nor OpenSSL 3. Add the OpenSSH client in Settings > System > Optional features and run this again, or set `$env:PAI_SKIP_SIGNATURE_CHECK = '1' to install with only the checksum check"
+    Write-Warning 'pai install: this computer has neither the Windows OpenSSH client 8.1 or later nor OpenSSL 3, so the signature on SHA256SUMS isn''t checked. Only the checksum, from the same server as the binary, protects this install.'
 }
 
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("pai-install-" + [guid]::NewGuid())

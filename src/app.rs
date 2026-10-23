@@ -308,7 +308,7 @@ pub fn open_web_app(env: &Env, config: &Config) -> bool {
         return false;
     }
     // The web app has no link to its Account screen; it opens on the chat, with Account a click away.
-    let url = format!("{}/", config.app_url());
+    let url = format!("{}/#account", config.app_url());
     if !openable_url(&url) {
         return false;
     }

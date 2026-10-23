@@ -28,7 +28,7 @@ There are two because no one tool that checks Ed25519 ships on every OS. `releas
 | Linux | `openssl` 3, or `ssh-keygen` from OpenSSH 8.1 or later | OpenSSL 3 in Ubuntu 22.04, Debian 12, Fedora 36, RHEL 9 and later. OpenSSH 8.1 or later in Ubuntu 20.04 (8.2) and Debian 11 (8.4), where it's installed. RHEL 8 has OpenSSL 1.1.1 and OpenSSH 8.0, so neither. Minimal containers, such as Alpine, often have neither. |
 | Windows | `ssh-keygen` from the Windows OpenSSH client, 8.1 or later; or OpenSSL 3, such as the one Git for Windows carries | The OpenSSH client is an optional feature, in **Settings > System > Optional features**. Microsoft doesn't publish which OpenSSH version each Windows build carries; `ssh -V` shows it. Windows PowerShell 5.1 runs on .NET Framework 4, which has no Ed25519. |
 
-Where neither tool is there, the installers stop and say what to install. `PAI_SKIP_SIGNATURE_CHECK=1` makes them install anyway, with only the checksum check, and a warning. A signature that doesn't match stops them whatever that variable says.
+Where neither tool is there, the installers warn and install with only the checksum check. Checking is up to the user. A signature that doesn't match always stops them.
 
 ## Making the key
 

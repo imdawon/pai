@@ -22,7 +22,7 @@ irm https://privacyai.example/pai/install.ps1 -OutFile $env:TEMP\pai-install.ps1
 
 Both download the binary for your OS and CPU, check the signature on `SHA256SUMS` with the pai release key (below), check the binary against `SHA256SUMS`, and install to `~/.local/bin` or `%LOCALAPPDATA%\pai`. `PAI_DOWNLOAD_BASE` changes where they download from, and `PAI_INSTALL_DIR` where they install.
 
-The installers check the signature with OpenSSL 3, or with `ssh-keygen` from OpenSSH 8.1 or later. macOS ships OpenSSH. Ubuntu 22.04, Debian 12, Fedora 36 and RHEL 9 and later ship OpenSSL 3. On Windows, `install.ps1` uses the Windows OpenSSH client (**Settings > System > Optional features**), or an OpenSSL 3 such as the one Git for Windows carries. With neither, the installers stop. `PAI_SKIP_SIGNATURE_CHECK=1` installs anyway, with only the checksum, which comes from the same server as the binary.
+The installers check the signature with OpenSSL 3, or with `ssh-keygen` from OpenSSH 8.1 or later. macOS ships OpenSSH. Ubuntu 22.04, Debian 12, Fedora 36 and RHEL 9 and later ship OpenSSL 3. On Windows, `install.ps1` uses the Windows OpenSSH client (**Settings > System > Optional features**), or an OpenSSL 3 such as the one Git for Windows carries. With neither, the installers warn and install with only the checksum, which comes from the same server as the binary. A signature that doesn't match always stops them.
 
 ### Release key
 
@@ -38,7 +38,7 @@ Or paste `skill/dawonai/SKILL.md` into your coding agent, and it does all of thi
 
 | Command | Does |
 |---|---|
-| `pai pair <code> [--relay URL] [--api URL] [--app URL] [--name NAME]` | Links this machine using the 8-character code from **Connect a device** in the web app. Makes an Ed25519 device key and keeps it in the OS keychain. |
+| `pai pair <code> [--relay URL] [--api URL] [--app URL] [--name NAME]` | Links this machine using the 8-character code from **Account > Set up a coding tool** in the DawonAI web app. Makes an Ed25519 device key and keeps it in the OS keychain. |
 | `pai token` | What coding tools run. Makes sure there's a credential for today, starts the local proxy if it isn't running (or is from an older `pai`), and prints the local key and nothing else. |
 | `pai proxy` | Runs the local proxy in the foreground. It only answers on 127.0.0.1, only with the local key, and refuses requests from web pages. Once a day, at a random time, it collects tomorrow's credential. |
 | `pai status` | Paired or not, account, plan, device, credentials for today and tomorrow, pins, and whether the proxy is running. Never prints secrets. |

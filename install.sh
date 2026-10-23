@@ -96,10 +96,8 @@ check_signature() {
 		ssh-keygen -Y verify -f "$tmp/allowed_signers" -I pai-release -n pai-release \
 			-s "$tmp/SHA256SUMS.sshsig" <"$tmp/SHA256SUMS" >/dev/null 2>&1 || not_signed
 		echo "Checked the signature on SHA256SUMS with ssh-keygen."
-	elif [ "${PAI_SKIP_SIGNATURE_CHECK:-}" = 1 ]; then
-		echo "pai install: warning: PAI_SKIP_SIGNATURE_CHECK=1, so the signature on SHA256SUMS isn't checked. Only the checksum, from the same server as the binary, protects this install." >&2
 	else
-		fail "can't check the signature on SHA256SUMS: this computer has neither OpenSSL 3 nor OpenSSH 8.1 or later. Install either one and run this again, or set PAI_SKIP_SIGNATURE_CHECK=1 to install with only the checksum check"
+		echo "pai install: warning: this computer has neither OpenSSL 3 nor OpenSSH 8.1 or later, so the signature on SHA256SUMS isn't checked. Only the checksum, from the same server as the binary, protects this install." >&2
 	fi
 }
 

@@ -22,7 +22,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Link this machine using the code from Connect a device in the web app
+    /// Link this machine using the code from Account > Set up a coding tool in the DawonAI web app
     Pair {
         /// The 8-character pairing code (dashes and case don't matter)
         code: String,
