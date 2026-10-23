@@ -539,12 +539,14 @@ fn fetch_credential(env: &Env, config: &Config, offset: u32) -> Result<(String, 
         detail: format!("status: {}", account.status),
     })?;
     let day = period_now(plan, env.clock.now()) + offset;
+    // Adult accounts' credentials come from the adult keys, so the model server allows erotica.
+    let adult = account.adult;
 
     let keys = relay.keys()?;
     let info = keys
         .keys
         .iter()
-        .find(|k| k.plan == plan && k.day == day)
+        .find(|k| k.plan == plan && k.day == day && k.adult == adult)
         .ok_or_else(|| {
             Error::BadIssuerResponse(format!(
                 "it has no {} key for period {day}; check that this computer's date and time are right",
@@ -554,10 +556,11 @@ fn fetch_credential(env: &Env, config: &Config, offset: u32) -> Result<(String, 
     let issuer = pai_proto::issuer_public_key_from_spki(&info.spki)
         .map_err(|e| Error::BadIssuerResponse(format!("unreadable issuer key: {e}")))?;
 
-    let pending = PendingCredential::new(&issuer, plan, day)
+    let pending = PendingCredential::new_for(&issuer, plan, adult, day)
         .map_err(|e| Error::BadIssuerResponse(e.to_string()))?;
     let request = CredentialRequest {
         plan,
+        adult,
         day,
         blind_message: b64(pending.blind_message()),
     };

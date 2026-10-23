@@ -222,6 +222,7 @@ fn handle(
                 delete_after_days: Some(365),
                 devices_used: s.devices.len() as u32,
                 device_limit: 5,
+                adult: false,
             })
         }
         ("GET", "/v1/keys") => ok(IssuerKeys {
