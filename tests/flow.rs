@@ -68,7 +68,7 @@ fn pair_token_cached_token_unpair() {
     let shown = status.to_string();
     assert!(
         shown.contains("Paired:     yes")
-            && shown.contains("chat (active)")
+            && shown.contains("Chat, monthly (active)")
             && shown.contains("dev_1"),
         "{shown}"
     );
