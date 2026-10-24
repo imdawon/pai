@@ -29,7 +29,17 @@ The installers check the signature with OpenSSL 3, or with `ssh-keygen` from Ope
 Every release's `SHA256SUMS` is signed with this Ed25519 key, which is kept offline. A changed binary or `SHA256SUMS` fails the installers' check. The installers come from the same server as the binaries, so whoever controls that server could change the key in them too: compare the key in `install.sh` or `install.ps1` with this one, or download the installer from this repo. The release page shows the same key. `release/SIGNING.md` covers checking a download by hand.
 
 <!-- release-key -->
-No release key has been made yet.
+```text
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAxIp4fBpqtyz7ci9B/bkVLVkyx++yJ/mRzn+WdzkqPGY=
+-----END PUBLIC KEY-----
+```
+
+The same key as an OpenSSH allowed-signers line:
+
+```text
+pai-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMSKeHwaarcs+3IvQf25FS1ZMsfvsif5kc5/lnc5Kjxm
+```
 <!-- /release-key -->
 
 Or paste `skill/dawonai/SKILL.md` into your coding agent, and it does all of this for you.

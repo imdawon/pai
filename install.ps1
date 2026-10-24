@@ -6,8 +6,8 @@ $ProgressPreference = 'SilentlyContinue'
 
 # The pai release key (release/signing-key.pub), written here by release/embed-key.sh. The same
 # key is in pai's README on GitHub and on https://privacyai.example/pai/.
-$signingKeySpki = ''
-$signingKeySsh = ''
+$signingKeySpki = 'MCowBQYDK2VwAyEAxIp4fBpqtyz7ci9B/bkVLVkyx++yJ/mRzn+WdzkqPGY='
+$signingKeySsh = 'AAAAC3NzaC1lZDI1NTE5AAAAIMSKeHwaarcs+3IvQf25FS1ZMsfvsif5kc5/lnc5Kjxm'
 
 if (-not $signingKeySpki -or -not $signingKeySsh) {
     throw "pai install: this copy of install.ps1 has no pai release key, so it can't check the download. Use https://privacyai.example/pai/install.ps1"

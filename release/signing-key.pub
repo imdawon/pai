@@ -1,11 +1,3 @@
-PLACEHOLDER: no pai release signing key has been made yet.
-
-This file holds the Ed25519 public key that signs SHA256SUMS for every pai release. To fill it in:
-
-1. Make the key on an offline machine, as release/SIGNING.md says.
-2. Replace all of this text with the output of `openssl pkey -in pai-release.key -pubout`,
-   which is three lines starting with -----BEGIN PUBLIC KEY-----.
-3. Run `sh release/embed-key.sh`, which copies the key into install.sh, install.ps1 and README.md.
-4. Commit all four files, and publish the key in the other places release/SIGNING.md lists.
-
-release/build.sh refuses to build a release while this file holds this text.
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAxIp4fBpqtyz7ci9B/bkVLVkyx++yJ/mRzn+WdzkqPGY=
+-----END PUBLIC KEY-----

@@ -6,8 +6,8 @@ set -eu
 
 # The pai release key (release/signing-key.pub), written here by release/embed-key.sh. The same
 # key is in pai's README on GitHub and on https://privacyai.example/pai/.
-SIGNING_KEY_SPKI=''
-SIGNING_KEY_SSH=''
+SIGNING_KEY_SPKI='MCowBQYDK2VwAyEAxIp4fBpqtyz7ci9B/bkVLVkyx++yJ/mRzn+WdzkqPGY='
+SIGNING_KEY_SSH='AAAAC3NzaC1lZDI1NTE5AAAAIMSKeHwaarcs+3IvQf25FS1ZMsfvsif5kc5/lnc5Kjxm'
 
 BASE="${PAI_DOWNLOAD_BASE:-https://privacyai.example/pai/latest}"
 BASE="${BASE%/}"
