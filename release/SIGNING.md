@@ -66,6 +66,12 @@ The key only helps if people can get it from somewhere other than the server it 
 Plug in the key's storage, then:
 
 ```sh
+PAI_SIGNING_KEY=/Volumes/<drive>/pai-release.key release/publish.sh
+```
+
+`release/publish.sh` reads the box's current API key pin over SSH (and checks that `api.<domain>` serves that key), takes the spare pin from `release/spare-api-pin`, runs `release/build.sh`, then rebuilds the DawonAI site with the release in `/pai/latest/`, deploys it to Cloudflare Pages and checks every file the site serves against the build. To build without publishing:
+
+```sh
 PAI_SIGNING_KEY=/Volumes/<drive>/pai-release.key PAI_RELEASE_API_PINS=<current>,<spare> release/build.sh
 ```
 
