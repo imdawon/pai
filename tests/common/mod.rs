@@ -223,6 +223,7 @@ fn handle(
                 devices_used: s.devices.len() as u32,
                 device_limit: 5,
                 adult: false,
+                beta: false,
             })
         }
         ("GET", "/v1/keys") => ok(IssuerKeys {
