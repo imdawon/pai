@@ -5,9 +5,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result, io_err};
 
-pub const DEFAULT_RELAY_URL: &str = "https://relay.privacyai.example";
-pub const DEFAULT_API_URL: &str = "https://api.privacyai.example";
-pub const DEFAULT_APP_URL: &str = "https://app.privacyai.example";
+// A release build sets these from its domain (release/build.sh); other builds use the placeholder.
+pub const DEFAULT_RELAY_URL: &str = match option_env!("PAI_RELEASE_RELAY_URL") {
+    Some(url) => url,
+    None => "https://relay.privacyai.example",
+};
+pub const DEFAULT_API_URL: &str = match option_env!("PAI_RELEASE_API_URL") {
+    Some(url) => url,
+    None => "https://api.privacyai.example",
+};
+pub const DEFAULT_APP_URL: &str = match option_env!("PAI_RELEASE_APP_URL") {
+    Some(url) => url,
+    None => "https://app.privacyai.example",
+};
 
 /// Non-secret settings written by `pai pair`. Secrets live in the keystore.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

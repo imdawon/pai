@@ -26,10 +26,10 @@ enum Command {
     Pair {
         /// The 8-character pairing code (dashes and case don't matter)
         code: String,
-        /// Relay URL [env: PAI_RELAY_URL] [default: https://relay.privacyai.example]
+        /// Relay URL [env: PAI_RELAY_URL] [default: this release's relay]
         #[arg(long)]
         relay: Option<String>,
-        /// Model API URL [env: PAI_API_URL] [default: https://api.privacyai.example]
+        /// Model API URL [env: PAI_API_URL] [default: this release's model API]
         #[arg(long)]
         api: Option<String>,
         /// DawonAI web app URL, which pai opens if this device's link is removed [env: PAI_APP_URL] [default: app.<domain> for a relay at relay.<domain>]

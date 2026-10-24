@@ -17,6 +17,8 @@ project="${PAI_PAGES_PROJECT:-dawonai}"
 box="${PAI_BOX:-supercomputer@100.126.243.95}"
 box_key="${PAI_BOX_KEY:-$HOME/.ssh/id_supercomputer}"
 
+export PAI_RELEASE_DOMAIN="$domain"
+
 fail() { echo "publish: $*" >&2; exit 1; }
 step() { printf '\n== %s\n' "$*"; }
 
@@ -49,7 +51,6 @@ step "site for $domain"
 cp -R "$dist/$version" "$dist/latest" "$site/dist/site/pai/"
 # The release page (release/index.sh) goes in latest/, since the site has its own page at /pai/.
 # Its links are written for /pai/, so they're rewritten for one folder down.
-PAI_SITE="https://$domain" sh release/index.sh "$version" >/dev/null
 sed -e 's#href="latest/#href="#g' -e 's#href="\([0-9][^"/]*\)/#href="../\1/#g' -e 's#href="install\.#href="../install.#g' \
 	"$dist/index.html" >"$site/dist/site/pai/latest/index.html"
 

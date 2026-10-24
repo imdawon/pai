@@ -16,6 +16,16 @@ export PATH="$HOME/.cargo/bin:$PATH"
 RUST_ALPINE="rust:1.95-alpine"
 CARGO_XWIN="ghcr.io/rust-cross/cargo-xwin@sha256:9856b895265d4966f212228ba64802cf89337e2a2a537aa2533c1b8784cbc81b"
 
+# The domain this release talks to: pai pairs with relay.<domain> and sends requests to
+# api.<domain>, and the installers and skill name https://<domain>/pai/.
+: "${PAI_RELEASE_DOMAIN:?set PAI_RELEASE_DOMAIN to the domain this release is for, such as example.com}"
+printf '%s' "$PAI_RELEASE_DOMAIN" | grep -Eq '^[a-z0-9]([a-z0-9.-]*[a-z0-9])?\.[a-z]{2,}$' ||
+	{ echo "build: PAI_RELEASE_DOMAIN isn't a lowercase domain name: $PAI_RELEASE_DOMAIN" >&2; exit 1; }
+[ "$PAI_RELEASE_DOMAIN" != privacyai.example ] || { echo "build: privacyai.example is the placeholder, not a release domain" >&2; exit 1; }
+export PAI_RELEASE_RELAY_URL="https://relay.$PAI_RELEASE_DOMAIN"
+export PAI_RELEASE_API_URL="https://api.$PAI_RELEASE_DOMAIN"
+export PAI_RELEASE_APP_URL="https://app.$PAI_RELEASE_DOMAIN"
+
 # Check the signing key before spending time on the build.
 : "${PAI_SIGNING_KEY:?set PAI_SIGNING_KEY to the path of the release signing key (release/SIGNING.md)}"
 [ -r "$PAI_SIGNING_KEY" ] || { echo "build: can't read the signing key $PAI_SIGNING_KEY" >&2; exit 1; }
@@ -81,7 +91,8 @@ for arch in aarch64 x86_64; do
 	docker run --rm --platform "$platform" \
 		-v "$root:/src/pai:ro" -v "$relay:/src/pai-relay:ro" -v "$out:/out" \
 		-v "pai-cargo-registry-$arch:/usr/local/cargo/registry" -v "pai-target-linux-$arch:/target" \
-		-e CARGO_TARGET_DIR=/target -e PAI_RELEASE_API_PINS -w /src/pai "$RUST_ALPINE" \
+		-e CARGO_TARGET_DIR=/target -e PAI_RELEASE_API_PINS \
+		-e PAI_RELEASE_RELAY_URL -e PAI_RELEASE_API_URL -e PAI_RELEASE_APP_URL -w /src/pai "$RUST_ALPINE" \
 		sh -euc "apk add --no-cache musl-dev >/dev/null
 			cargo build --release --locked --target $target
 			cp /target/$target/release/pai /out/pai-$target"
@@ -95,15 +106,25 @@ for target in x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
 		-v "$root:/src/pai:ro" -v "$relay:/src/pai-relay:ro" -v "$out:/out" \
 		-v pai-xwin-cache:/root/.cache/cargo-xwin -v pai-cargo-registry-xwin:/usr/local/cargo/registry \
 		-v pai-target-xwin:/target \
-		-e CARGO_TARGET_DIR=/target -e PAI_RELEASE_API_PINS -e RUSTFLAGS="-C target-feature=+crt-static" -w /src/pai "$CARGO_XWIN" \
+		-e CARGO_TARGET_DIR=/target -e PAI_RELEASE_API_PINS \
+		-e PAI_RELEASE_RELAY_URL -e PAI_RELEASE_API_URL -e PAI_RELEASE_APP_URL -e RUSTFLAGS="-C target-feature=+crt-static" -w /src/pai "$CARGO_XWIN" \
 		sh -euc "cargo xwin build --cross-compiler clang --release --locked --target $target
 			cp /target/$target/release/pai.exe /out/pai-$target.exe"
 done
 
 step "extras"
-(cd skill && rm -f "$out/dawonai-skill.zip" && zip -qrX "$out/dawonai-skill.zip" dawonai)
+# The skill tells a coding agent where to download pai, so it names the release domain.
+cp -R skill "$work/skill"
+find "$work/skill" -type f -exec sed -i '' "s/privacyai\.example/$PAI_RELEASE_DOMAIN/g" {} +
+(cd "$work/skill" && rm -f "$out/dawonai-skill.zip" && zip -qrX "$out/dawonai-skill.zip" dawonai)
 cp integrations/opencode/src/index.ts "$out/opencode-dawonai.ts"
 cp integrations/omp/dawonai.ts "$out/omp-dawonai.ts"
+
+# Every binary must name this release's relay, not the placeholder.
+for bin in "$out"/pai-*; do
+	grep -aq "https://relay.$PAI_RELEASE_DOMAIN" "$bin" && ! grep -aq 'relay\.privacyai\.example' "$bin" ||
+		{ echo "build: $(basename "$bin") doesn't point at relay.$PAI_RELEASE_DOMAIN" >&2; exit 1; }
+done
 
 (cd "$out" && shasum -a 256 -- * | grep -v ' SHA256SUMS$' >SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS)
 
@@ -125,7 +146,7 @@ cp -R "$out" "$dist/latest"
 cp install.sh install.ps1 "$dist/"
 
 step "index.html"
-sh release/index.sh "$version"
+PAI_SITE="https://$PAI_RELEASE_DOMAIN" sh release/index.sh "$version"
 
 step "done"
 ls -l "$out"
