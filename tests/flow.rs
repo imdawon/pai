@@ -416,3 +416,35 @@ fn a_new_version_rewrites_set_up_tools_once() {
     pai::update::refresh_settings(&t.env);
     assert!(std::fs::read_to_string(&settings).unwrap().contains("1000"));
 }
+
+/// pai 0.1.6 moved secrets out of the OS store on macOS only, and silently gave up when it couldn't
+/// read it, so an update left paired computers "not paired". The move now happens wherever the
+/// device key is first needed, from every old store, and a paired computer with no key anywhere
+/// says so instead of sending the user to pair again.
+#[test]
+fn an_update_finds_the_device_key_where_an_older_pai_kept_it() {
+    use pai::keystore::{Keystore, PROXY_KEY};
+    let relay = FakeRelay::start(CODE);
+    let mut t = paired(&relay);
+    let key = t.env.keystore.get(DEVICE_KEY).unwrap().unwrap();
+
+    let old = Keystore::File(t.dir.path().join("old-secrets.json"));
+    old.set(DEVICE_KEY, &key).unwrap();
+    old.set(PROXY_KEY, "pai-local-old").unwrap();
+    t.env.keystore.delete(DEVICE_KEY).unwrap();
+    t.env.old_stores = vec![old.clone()];
+
+    app::credential(&t.env, false).unwrap();
+    assert_eq!(t.env.keystore.get(DEVICE_KEY).unwrap().as_deref().map(String::as_str), Some(key.as_str()), "moved into the secrets file");
+    assert_eq!(t.env.keystore.get(PROXY_KEY).unwrap().as_deref().map(String::as_str), Some("pai-local-old"));
+    assert!(old.get(DEVICE_KEY).unwrap().is_none(), "and gone from the old store");
+
+    t.env.keystore.delete(DEVICE_KEY).unwrap();
+    let e = app::credential(&t.env, true).unwrap_err();
+    assert!(matches!(e, Error::DeviceKeyMissing), "{e}");
+    assert!(e.to_string().contains("pai unpair"), "{e}");
+
+    let notes = app::unpair(&t.env).unwrap();
+    assert!(notes.iter().any(|n| n.contains("Devices in the web app")), "{notes:?}");
+    assert!(t.env.config().unwrap().is_none(), "unpair still works without the key");
+}

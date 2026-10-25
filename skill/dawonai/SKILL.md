@@ -105,7 +105,8 @@ Tell the user to quit and restart the harness so it reads the new config:
 | `relay unreachable` | 5 | Check the network, VPN or proxy, then run the check again. |
 | `this device has already collected 3 credentials today` | 1 | Wait for the time it gives, or for midnight UTC. |
 | `this computer's clock is more than 2 minutes off` | 1 | The user fixes the system time. |
-| `your login keychain is locked` or `pai couldn't read your login keychain` | 1 | macOS only, on the first run after updating from pai 0.1.5 or older, when `pai` moves the device key out of the keychain. The user runs the same `pai` command once in a Terminal window on the Mac, or runs `pai unpair` and pairs again (step 2). |
+| `your login keychain is locked`, `pai couldn't read your login keychain` or `pai couldn't read the OS credential store` | 1 | After updating from pai 0.1.5 or older, `pai` moves the device key out of the OS store and couldn't read it. The user runs the same `pai` command once in a terminal on that computer (on a Mac, allowing the keychain prompt), or runs `pai unpair` and pairs again (step 2). |
+| `this computer is paired, but pai can't find its device key` | 1 | Run `pai unpair`, then step 2. |
 
 Errors the harness shows from the proxy:
 

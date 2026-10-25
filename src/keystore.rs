@@ -18,11 +18,10 @@ pub const PROXY_KEY: &str = "local-proxy-key";
 /// Holds the device key and the cached day credentials.
 #[derive(Debug, Clone)]
 pub enum Keystore {
-    /// The macOS login keychain, where pai before 0.1.6 kept its secrets. Read only to move them
-    /// into the file: the keychain tied each item to the binary that saved it, and pai's ad-hoc
-    /// signature changes with every update, so each update brought a permission prompt, or a
-    /// failure over SSH, where nothing can show one.
-    #[cfg(target_os = "macos")]
+    /// The OS store (the macOS login keychain, Windows Credential Manager or the Secret Service on
+    /// Linux), where pai before 0.1.6 kept its secrets. Read only to move them into the file: the
+    /// macOS keychain tied each item to the binary that saved it, and pai's ad-hoc signature changes
+    /// with every update, so each update brought a permission prompt, or a failure over SSH.
     Os,
     /// `secrets.json` next to `config.json`, created with mode 0600 on Unix. On Windows it relies
     /// on the user profile's own permissions, like other tools' token files.
@@ -32,7 +31,6 @@ pub enum Keystore {
 impl Keystore {
     pub fn describe(&self) -> String {
         match self {
-            #[cfg(target_os = "macos")]
             Keystore::Os => "OS keychain".into(),
             Keystore::File(p) => format!("file {}", p.display()),
         }
@@ -42,7 +40,6 @@ impl Keystore {
     /// never registers a device whose key it then can't keep.
     pub fn check(&self) -> Result<()> {
         match self {
-            #[cfg(target_os = "macos")]
             Keystore::Os => {
                 if let Err(e) = keyring::Entry::store_status() {
                     return Err(Error::KeychainUnavailable(e.to_string()));
@@ -55,7 +52,6 @@ impl Keystore {
 
     pub fn get(&self, name: &str) -> Result<Option<Zeroizing<String>>> {
         match self {
-            #[cfg(target_os = "macos")]
             Keystore::Os => {
                 let entry = os_entry(name)?;
                 match entry.get_password() {
@@ -70,7 +66,6 @@ impl Keystore {
 
     pub fn set(&self, name: &str, value: &str) -> Result<()> {
         match self {
-            #[cfg(target_os = "macos")]
             Keystore::Os => {
                 macos_keychain_ready()?;
                 os_entry(name)?.set_password(value).map_err(os_error)
@@ -85,7 +80,6 @@ impl Keystore {
 
     pub fn delete(&self, name: &str) -> Result<()> {
         match self {
-            #[cfg(target_os = "macos")]
             Keystore::Os => match os_entry(name)?.delete_credential() {
                 Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
                 Err(e) => Err(os_error(e)),
@@ -127,6 +121,11 @@ fn macos_keychain_ready() -> Result<()> {
         Err(e) if e.code() == ITEM_NOT_FOUND => Ok(()),
         Err(e) => Err(unreachable(e.to_string())),
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_keychain_ready() -> Result<()> {
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -178,7 +177,6 @@ mod mac {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn os_entry(name: &str) -> Result<keyring::Entry> {
     keyring::Entry::new(SERVICE, name).map_err(|e| match e {
         keyring::Error::NoDefaultStore => match keyring::Entry::store_status() {
@@ -189,8 +187,8 @@ fn os_entry(name: &str) -> Result<keyring::Entry> {
     })
 }
 
-#[cfg(target_os = "macos")]
 fn os_error(e: keyring::Error) -> Error {
+    #[cfg(target_os = "macos")]
     if matches!(e, keyring::Error::NoStorageAccess(_) | keyring::Error::PlatformFailure(_))
         && matches!(mac::default_keychain_unlocked(), Ok(false))
     {

@@ -38,6 +38,9 @@ impl Clock {
 pub struct Env {
     pub paths: Paths,
     pub keystore: Keystore,
+    /// Where pai before 0.1.6 may have kept the secrets, checked in order the first time the
+    /// device key is needed and missing (`adopt_old_secrets`). Empty in tests.
+    pub old_stores: Vec<Keystore>,
     pub clock: Clock,
     pub relay_timeout: Duration,
     /// The path coding tools should run, written into their config by `pai setup`.
@@ -70,9 +73,11 @@ impl Env {
         };
         let pai_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("pai"));
         let prefetch = vars.get("PAI_PREFETCH").map(|v| v.trim()) != Some("0");
+        let old_stores = paths.old_secrets_file.iter().map(|p| Keystore::File(p.clone())).chain([Keystore::Os]).collect();
         Ok(Env {
             paths,
             keystore,
+            old_stores,
             clock: Clock::System,
             relay_timeout: Duration::from_secs(30),
             pai_bin,
@@ -110,40 +115,28 @@ impl Env {
         trim_url(self.var("PAI_API_URL").unwrap_or(DEFAULT_API_URL))
     }
 
-    /// Moves what a pai before 0.1.6 kept in the macOS keychain into the secrets file, once, so
-    /// the update doesn't ask anyone to pair again. Reading the old items can prompt one last
-    /// time, since the keychain tied them to the binary that saved them.
-    #[cfg(target_os = "macos")]
-    pub fn adopt_keychain_secrets(&self) -> Result<()> {
-        if !self.paths.config_file().exists() || self.keystore.get(DEVICE_KEY)?.is_some() {
-            return Ok(());
-        }
-        let keychain = Keystore::Os;
-        match keychain.check() {
-            Ok(()) => {}
-            Err(Error::KeychainLocked) => return Err(Error::KeychainLocked),
-            // No keychain to read (a sandbox, or a home without one): an earlier pai couldn't
-            // have saved anything in it from here either.
-            Err(_) => return Ok(()),
-        }
-        let Some(device_key) = keychain.get(DEVICE_KEY)? else {
-            return Ok(());
-        };
-        self.keystore.set(DEVICE_KEY, &device_key)?;
-        for name in [CREDENTIAL, NEXT_CREDENTIAL, PROXY_KEY] {
-            if let Some(value) = keychain.get(name)? {
-                self.keystore.set(name, &value)?;
+    /// Finds the device key where pai before 0.1.6 kept it, the first time this pai needs it, and
+    /// moves every secret from there into the secrets file, so an update never asks anyone to pair
+    /// again. Errors from the old store are reported, not skipped: "not paired" would send the user
+    /// to pair again, which a paired computer refuses.
+    fn adopt_old_secrets(&self) -> Result<Option<Zeroizing<String>>> {
+        for old in &self.old_stores {
+            if !matches!(old, Keystore::File(p) if !p.exists()) {
+                old.check()?;
             }
+            let Some(key) = old.get(DEVICE_KEY)? else { continue };
+            self.keystore.set(DEVICE_KEY, &key)?;
+            for name in [CREDENTIAL, NEXT_CREDENTIAL, PROXY_KEY] {
+                if let Ok(Some(value)) = old.get(name) {
+                    let _ = self.keystore.set(name, &value);
+                }
+            }
+            for name in [DEVICE_KEY, CREDENTIAL, NEXT_CREDENTIAL, PROXY_KEY] {
+                let _ = old.delete(name);
+            }
+            return Ok(Some(key));
         }
-        for name in [DEVICE_KEY, CREDENTIAL, NEXT_CREDENTIAL, PROXY_KEY] {
-            let _ = keychain.delete(name);
-        }
-        Ok(())
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    pub fn adopt_keychain_secrets(&self) -> Result<()> {
-        Ok(())
+        Ok(None)
     }
 
     pub fn paired(&self) -> Result<Config> {
@@ -151,7 +144,11 @@ impl Env {
     }
 
     fn device_key(&self) -> Result<SigningKey> {
-        let stored = self.keystore.get(DEVICE_KEY)?.ok_or(Error::NotPaired)?;
+        let stored = match self.keystore.get(DEVICE_KEY)? {
+            Some(s) => s,
+            None if self.paths.config_file().exists() => self.adopt_old_secrets()?.ok_or(Error::DeviceKeyMissing)?,
+            None => return Err(Error::NotPaired),
+        };
         let bytes = Zeroizing::new(unb64(&stored).ok_or_else(|| {
             Error::Keystore(
                 "the stored device key is corrupt; run `pai unpair` and pair again".into(),
@@ -811,11 +808,14 @@ pub fn unpair(env: &Env) -> Result<Vec<String>> {
     // Not env.config(), which a release build refuses for a test-mode pairing: unpairing is how
     // the user gets rid of one. The relay call below still uses this build's trust.
     let config = Config::load(&env.paths.config_file())?;
+    // Unpairing has to work when the key can't be found or read, since it's how to recover.
     let key = match env.device_key() {
         Ok(k) => Some(k),
         Err(Error::NotPaired) => None,
-        Err(e) if e.is_keystore_unavailable() => return Err(e),
-        Err(_) => None,
+        Err(e) => {
+            notes.push(format!("Couldn't use this computer's device key ({e}), so the relay still lists it. Remove it under Devices in the web app."));
+            None
+        }
     };
     match (&config, &key) {
         (Some(cfg), Some(key)) => match env

@@ -1,6 +1,6 @@
 [package]
 name = "pai"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 description = "Gives coding tools a DawonAI day credential without a long-lived API key"
 license = "MIT"
@@ -25,10 +25,10 @@ rand = "0.8"
 ring = "0.17"
 gethostname = "1"
 zeroize = "1"
+# Only to move secrets out of the OS store, where pai before 0.1.6 kept them.
+keyring = "4.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# Only to move secrets out of the login keychain, where pai before 0.1.6 kept them.
-keyring = "4.2"
 security-framework = "3.7"
 
 [features]

@@ -290,11 +290,13 @@ impl TestEnv {
         let config_dir = dir.path().join("config");
         let paths = Paths {
             secrets_file: config_dir.join("secrets.json"),
+            old_secrets_file: None,
             config_dir,
             home: dir.path().join("home"),
         };
         let env = Env {
             keystore: Keystore::File(paths.secrets_file.clone()),
+            old_stores: Vec::new(),
             paths,
             clock: Clock::System,
             relay_timeout: Duration::from_secs(10),

@@ -112,6 +112,9 @@ pub struct Paths {
     pub config_dir: PathBuf,
     /// `secrets.json` next to `config.json`: the device key, both day credentials and the proxy key.
     pub secrets_file: PathBuf,
+    /// Where pai before 0.1.6 kept the secrets file with `PAI_KEYSTORE=file` on macOS and Windows,
+    /// `~/.config/pai/secrets.json`, when that's not `secrets_file`. Read once, to move it.
+    pub old_secrets_file: Option<PathBuf>,
     /// The user's home, where coding tools keep their config.
     pub home: PathBuf,
 }
@@ -142,6 +145,7 @@ impl Paths {
             let dir = PathBuf::from(dir);
             return Ok(Paths {
                 secrets_file: dir.join("secrets.json"),
+                old_secrets_file: None,
                 config_dir: dir,
                 home,
             });
@@ -149,8 +153,11 @@ impl Paths {
         let config_dir = dirs::config_dir()
             .ok_or_else(|| Error::Io("couldn't find the OS config directory".into()))?
             .join("pai");
+        let secrets_file = config_dir.join("secrets.json");
+        let old = home.join(".config").join("pai").join("secrets.json");
         Ok(Paths {
-            secrets_file: config_dir.join("secrets.json"),
+            old_secrets_file: (old != secrets_file).then_some(old),
+            secrets_file,
             config_dir,
             home,
         })

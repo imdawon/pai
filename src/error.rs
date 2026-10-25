@@ -17,10 +17,10 @@ pub enum Error {
     RelayUnreachable(String),
     Relay { status: u16, message: String },
     BadIssuerResponse(String),
-    #[cfg(target_os = "macos")]
     KeychainUnavailable(String),
     #[cfg(target_os = "macos")]
     KeychainLocked,
+    DeviceKeyMissing,
     Keystore(String),
     Io(String),
     Setup(String),
@@ -42,8 +42,9 @@ impl Error {
     /// The keystore itself can't be used, which no command should mistake for "nothing stored".
     pub fn is_keystore_unavailable(&self) -> bool {
         match self {
+            Error::KeychainUnavailable(_) => true,
             #[cfg(target_os = "macos")]
-            Error::KeychainUnavailable(_) | Error::KeychainLocked => true,
+            Error::KeychainLocked => true,
             _ => false,
         }
     }
@@ -134,6 +135,18 @@ impl fmt::Display for Error {
                 f,
                 "your login keychain is locked, and an earlier pai kept this computer's device key in it. Unlock it and run \
                  the same command again (over SSH: `security unlock-keychain`), or run `pai unpair` and pair again"
+            ),
+            #[cfg(not(target_os = "macos"))]
+            Error::KeychainUnavailable(detail) => write!(
+                f,
+                "pai couldn't read the OS credential store ({detail}), where pai before 0.1.6 kept this computer's \
+                 device key. On Linux that's the Secret Service: run this command once in your desktop session. \
+                 Or run `pai unpair` and pair again"
+            ),
+            Error::DeviceKeyMissing => write!(
+                f,
+                "this computer is paired, but pai can't find its device key. Run `pai unpair`, then pair again \
+                 from Account > Set up a coding tool in the DawonAI web app"
             ),
             Error::Keystore(msg) => write!(f, "couldn't use the keychain: {msg}"),
             Error::Io(msg) => write!(f, "{msg}"),
