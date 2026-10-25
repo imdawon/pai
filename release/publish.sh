@@ -61,17 +61,24 @@ wrangler pages deploy "$site/dist/site" --project-name "$project" --branch main 
 step "checking https://$domain/pai/latest/"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-ok=1
-for f in $(awk '{ print $2 }' "$dist/latest/SHA256SUMS") SHA256SUMS SHA256SUMS.sig SHA256SUMS.sshsig; do
-	f="${f#\*}"
-	if curl -fsS "https://$domain/pai/latest/$f" -o "$tmp/$f" && cmp -s "$tmp/$f" "$dist/latest/$f"; then
-		echo "ok    $f"
-	else
-		echo "FAIL  $f"
-		ok=0
-	fi
+# Pages can take a minute to serve a new deployment, so this tries for a few minutes before failing.
+# Failing here stops the script before the box gets the release, so no installed pai updates.
+for attempt in 1 2 3 4 5 6 7 8; do
+	ok=1
+	for f in $(awk '{ print $2 }' "$dist/latest/SHA256SUMS") SHA256SUMS SHA256SUMS.sig SHA256SUMS.sshsig; do
+		f="${f#\*}"
+		if curl -fsS "https://$domain/pai/latest/$f" -o "$tmp/$f" 2>/dev/null && cmp -s "$tmp/$f" "$dist/latest/$f"; then
+			[ "$attempt" -gt 1 ] || echo "ok    $f"
+		else
+			[ "$attempt" -gt 1 ] || echo "wait  $f"
+			ok=0
+		fi
+	done
+	[ "$ok" = 1 ] && break
+	echo "the site doesn't serve all of this release yet; checking again in 20 seconds ($attempt of 8)"
+	sleep 20
 done
-[ "$ok" = 1 ] || fail "the site doesn't serve this release yet; Pages can take a minute, then run the check again"
+[ "$ok" = 1 ] || fail "after about 3 minutes the site still doesn't serve this release. Check the Pages deployment, then run release/publish.sh again"
 step "copying to the box, for pai update"
 box="${PAI_BOX:-supercomputer@100.126.243.95}"
 box_key="${PAI_BOX_KEY:-$HOME/.ssh/id_supercomputer}"
