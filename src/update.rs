@@ -51,6 +51,12 @@ struct State {
     /// The version that last rewrote the coding tools' settings (`refresh_settings`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     settings_version: Option<String>,
+    /// The newest version the model API announced on a response, and when an update for it was
+    /// started (`start_for_announced`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    announced: Option<String>,
+    #[serde(default)]
+    announced_at: i64,
 }
 
 fn state_file(env: &Env) -> PathBuf {
@@ -73,6 +79,36 @@ fn save_state(env: &Env, s: &State) -> Result<()> {
 /// has no release domain compiled in, so it never replaces itself unasked.
 pub fn auto_enabled(env: &Env) -> bool {
     option_env!("PAI_RELEASE_API_URL").is_some() && env.var("PAI_AUTO_UPDATE") != Some("0")
+}
+
+/// How long a started update gets before an announcement of the same version starts another.
+const ANNOUNCE_RETRY: i64 = 3600;
+
+/// Whether an announced version calls for starting an update now: newer than this pai, and not
+/// one already started within the last hour.
+fn announcement_due(state: &State, announced: &str, now: i64) -> bool {
+    newer(announced, VERSION) && (state.announced.as_deref() != Some(announced) || now - state.announced_at >= ANNOUNCE_RETRY)
+}
+
+/// The model API names the latest release on every response, so a running proxy learns of one
+/// on the next request instead of at the next daily check. Starts `pai update --auto` for it and
+/// says whether it did. Never fails the caller.
+pub fn start_for_announced(env: &Env, announced: &str) -> bool {
+    if !auto_enabled(env) || asset().is_none() {
+        return false;
+    }
+    let now = env.clock.now();
+    let mut state = load_state(env);
+    if !announcement_due(&state, announced, now) {
+        return false;
+    }
+    state.announced = Some(announced.to_string());
+    state.announced_at = now;
+    state.next_check = now + CHECK_EVERY + rand::random::<u32>() as i64 % JITTER;
+    if save_state(env, &state).is_err() {
+        return false;
+    }
+    app::spawn_detached(env, &["update", "--auto"]).is_ok()
 }
 
 /// Starts `pai update --auto` in the background when a check is due. Never fails the caller.
@@ -242,7 +278,7 @@ fn version_parts(v: &str) -> Option<[u64; 3]> {
     it.next().is_none().then_some(parts)
 }
 
-fn newer(candidate: &str, current: &str) -> bool {
+pub(crate) fn newer(candidate: &str, current: &str) -> bool {
     match (version_parts(candidate), version_parts(current)) {
         (Some(a), Some(b)) => a > b,
         _ => false,
@@ -310,6 +346,19 @@ mod tests {
         assert!(!newer("0.1.2", "0.1.3"));
         assert!(!newer("0.1", "0.0.1"));
         assert!(!newer("0.1.4-rc1", "0.1.3"));
+    }
+
+    #[test]
+    fn starts_one_update_per_announced_version() {
+        let mut state = State::default();
+        assert!(!announcement_due(&state, VERSION, 1000), "this version");
+        assert!(!announcement_due(&state, "0.0.1", 1000), "older");
+        assert!(announcement_due(&state, "99.0.0", 1000));
+        state.announced = Some("99.0.0".into());
+        state.announced_at = 1000;
+        assert!(!announcement_due(&state, "99.0.0", 1000 + ANNOUNCE_RETRY - 1), "started an hour ago at most");
+        assert!(announcement_due(&state, "99.0.0", 1000 + ANNOUNCE_RETRY), "a failed update gets another go");
+        assert!(announcement_due(&state, "99.0.1", 1001), "a newer announcement");
     }
 
     #[test]

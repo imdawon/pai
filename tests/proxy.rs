@@ -23,6 +23,7 @@ const CODE: &str = "ABCD2345";
 struct Seen {
     requests: Vec<(String, Option<String>, bool)>,
     reject_first: bool,
+    announce: Option<String>,
 }
 
 /// A fake model API over TLS with a self-signed certificate for `localhost`. It records each
@@ -63,13 +64,11 @@ fn fake_gateway(seen: Arc<Mutex<Seen>>) -> (u16, String, String) {
                             } else {
                                 (200, r#"{"ok":true}"#)
                             };
-                            Ok::<_, Infallible>(
-                                hyper::Response::builder()
-                                    .status(status)
-                                    .header("content-type", "application/json")
-                                    .body(http_body_util::Full::new(bytes::Bytes::from(body)))
-                                    .unwrap(),
-                            )
+                            let mut builder = hyper::Response::builder().status(status).header("content-type", "application/json");
+                            if let Some(v) = &s.announce {
+                                builder = builder.header("pai-latest", v.as_str());
+                            }
+                            Ok::<_, Infallible>(builder.body(http_body_util::Full::new(bytes::Bytes::from(body))).unwrap())
                         }
                     });
                     let _ = hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(tls), svc).await;
@@ -153,6 +152,24 @@ fn forwards_with_the_credential_over_pinned_tls() {
     assert!(auth.as_deref().unwrap().starts_with("Bearer pai1."), "the credential is added");
     assert!(!had_key, "the local key never leaves this machine");
     assert_eq!(relay.issued(), 1);
+}
+
+#[test]
+fn keeps_the_announced_release_from_the_tool() {
+    let seen = Arc::new(Mutex::new(Seen { announce: Some("99.0.0".into()), ..Seen::default() }));
+    let (api_port, ca, pin) = fake_gateway(seen.clone());
+    let (p, _relay) = start(api_port, &ca, &pin);
+
+    let r = p
+        .http
+        .post(format!("http://127.0.0.1:{}/v1/messages", p.port))
+        .header("x-api-key", &p.key)
+        .body("{}")
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(r.headers()["x-pai-proxy"], "1");
+    assert!(r.headers().get("pai-latest").is_none(), "the announcement is for the proxy, not the coding tool");
 }
 
 #[test]

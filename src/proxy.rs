@@ -88,6 +88,8 @@ struct Proxy {
     in_flight: Arc<AtomicUsize>,
     /// Set when the proxy stopped to make way for an updated `pai`.
     restart: AtomicBool,
+    /// Woken when a response announced a newer release and an update was started.
+    update_poke: Notify,
 }
 
 /// Counts a request as in flight until it's dropped.
@@ -135,6 +137,7 @@ pub fn run(env: Env) -> Result<()> {
             stop: Notify::new(),
             in_flight: Arc::new(AtomicUsize::new(0)),
             restart: AtomicBool::new(false),
+            update_poke: Notify::new(),
         });
         if proxy.env.prefetch {
             tokio::spawn(prefetch_loop(proxy.env.clone()));
@@ -160,19 +163,35 @@ fn modified(path: &std::path::Path) -> Option<std::time::SystemTime> {
 }
 
 /// Starts background update checks when they're due, for machines where the proxy runs for days
-/// and `pai token` rarely does. Once `pai` on disk has been replaced, waits for a moment with no
-/// request in flight and stops, so `run` can start the new one in its place.
+/// and `pai token` rarely does, and watches closely once a response announced a release and an
+/// update was started. Once `pai` on disk has been replaced, waits for a moment with no request
+/// in flight and stops, so `run` can start the new one in its place.
 async fn update_loop(p: Arc<Proxy>) {
     let started_as = modified(&p.env.pai_bin);
     #[cfg(feature = "test-mode")]
     let every = p.env.var("PAI_TEST_UPDATE_POLL").and_then(|v| v.parse().ok()).map_or(Duration::from_secs(600), Duration::from_secs);
     #[cfg(not(feature = "test-mode"))]
     let every = Duration::from_secs(600);
+    let replaced = || started_as.is_some() && modified(&p.env.pai_bin) != started_as;
     loop {
-        tokio::time::sleep(every).await;
-        let env = p.env.clone();
-        let _ = tokio::task::spawn_blocking(move || crate::update::start_if_due(&env)).await;
-        if started_as.is_some() && modified(&p.env.pai_bin) != started_as {
+        let announced = tokio::select! {
+            _ = tokio::time::sleep(every) => false,
+            _ = p.update_poke.notified() => true,
+        };
+        if announced {
+            // The download takes seconds; give it ten minutes before going back to the slow loop.
+            let watch = every.min(Duration::from_secs(10));
+            for _ in 0..60 {
+                tokio::time::sleep(watch).await;
+                if replaced() {
+                    break;
+                }
+            }
+        } else {
+            let env = p.env.clone();
+            let _ = tokio::task::spawn_blocking(move || crate::update::start_if_due(&env)).await;
+        }
+        if replaced() {
             break;
         }
     }
@@ -324,7 +343,25 @@ const DROPPED: [HeaderName; 9] = [
 ];
 
 fn forwardable(name: &HeaderName) -> bool {
-    !DROPPED.contains(name) && name.as_str() != "x-api-key" && name.as_str() != "keep-alive"
+    !DROPPED.contains(name) && name.as_str() != "x-api-key" && name.as_str() != "keep-alive" && name.as_str() != LATEST
+}
+
+/// The model API names the latest pai release on every response, so a proxy hears of one on the
+/// next request rather than at the next daily check. Meant for the proxy, not the coding tool.
+const LATEST: &str = "pai-latest";
+
+fn note_announced_release(p: &Arc<Proxy>, headers: &HeaderMap) {
+    let Some(announced) = headers.get(LATEST).and_then(|v| v.to_str().ok()) else { return };
+    let announced = announced.trim().to_string();
+    if !crate::update::newer(&announced, crate::update::VERSION) {
+        return;
+    }
+    let p = p.clone();
+    tokio::task::spawn_blocking(move || {
+        if crate::update::start_for_announced(&p.env, &announced) {
+            p.update_poke.notify_one();
+        }
+    });
 }
 
 async fn forward(p: Arc<Proxy>, req: Request) -> Response {
@@ -359,6 +396,7 @@ async fn forward(p: Arc<Proxy>, req: Request) -> Response {
             Ok(r) => r,
             Err(e) => return unreachable(&p.api, &e),
         };
+        note_announced_release(&p, resp.headers());
         if resp.status() == StatusCode::UNAUTHORIZED && attempt == 0 {
             let status = resp.status();
             let resp_headers = resp.headers().clone();

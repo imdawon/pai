@@ -90,7 +90,7 @@ The secrets are a file, not keychain items, on every platform. pai updates itsel
 
 ## Updates
 
-Once a day, at a random time, the first `pai token` (or a running proxy) starts `pai update` in the background. It asks the model API, `https://api.<domain>/pai/latest/`, over the same pinned connection as your requests, so the check goes through the relay like any request and carries no credential.
+The model API names the latest release in a `pai-latest` header on every response. The first time a running proxy sees a version newer than its own, it starts `pai update` in the background, so an update begins on the first request after a release and the proxy is on the new version within a minute. A proxy that sends no requests still checks once a day, at a random time, as does the first `pai token` of the day. Checks and downloads go to `https://api.<domain>/pai/latest/` over the same pinned connection as your requests, through the relay like any request, and carry no credential.
 
 `pai` installs a release only if `SHA256SUMS` is signed by the release key built into it and the file matches its hash there, and never one older than itself. It writes the new binary next to the old one and renames it into place. A running proxy moves to the new binary once no request is in flight. The first `pai token` after an update or a reinstall rewrites the settings of the coding tools you set up with `--apply`, when the new release changes them (the context window, for example), backing up each file it changes.
 
