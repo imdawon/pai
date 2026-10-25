@@ -454,23 +454,10 @@ fn wait_for_fingerprint(env: &Env, key: &str, want: &str) -> bool {
 }
 
 /// Makes sure this version of `pai`'s proxy is running with this pairing, starting it if not.
-pub fn ensure_proxy(env: &Env) -> Result<()> {
-    let config = env.paired()?;
-    let key = local_key(env)?;
-    let want = crate::proxy::fingerprint(&config, &trust(env, Some(&config)));
-    match proxy_health(env, &key) {
-        Some(have) if have == want => return Ok(()),
-        Some(_) => stop_proxy_and_wait(env, &key),
-        None => {}
-    }
-    crate::proxy::upstream_client(env, &config)?;
-    // With the login service installed, let it own the proxy, so the two don't fight over the port.
-    if crate::service::restart(env) && wait_for_fingerprint(env, &key, &want) {
-        return Ok(());
-    }
-
+/// Runs this `pai` with `args` in the background, with no terminal, outliving the caller.
+pub fn spawn_detached(env: &Env, args: &[&str]) -> std::io::Result<()> {
     let mut cmd = std::process::Command::new(&env.pai_bin);
-    cmd.arg("proxy")
+    cmd.args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -487,7 +474,33 @@ pub fn ensure_proxy(env: &Env) -> Result<()> {
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
         cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
-    cmd.spawn().map_err(|e| Error::Io(format!("couldn't start pai's local proxy: {e}")))?;
+    cmd.spawn().map(|_| ())
+}
+
+/// The model API this machine uses: the pairing's, or this release's before pairing.
+pub fn api_url(env: &Env) -> String {
+    match env.config() {
+        Ok(Some(c)) => c.api_url,
+        _ => env.default_api_url(),
+    }
+}
+
+pub fn ensure_proxy(env: &Env) -> Result<()> {
+    let config = env.paired()?;
+    let key = local_key(env)?;
+    let want = crate::proxy::fingerprint(&config, &trust(env, Some(&config)));
+    match proxy_health(env, &key) {
+        Some(have) if have == want => return Ok(()),
+        Some(_) => stop_proxy_and_wait(env, &key),
+        None => {}
+    }
+    crate::proxy::upstream_client(env, &config)?;
+    // With the login service installed, let it own the proxy, so the two don't fight over the port.
+    if crate::service::restart(env) && wait_for_fingerprint(env, &key, &want) {
+        return Ok(());
+    }
+
+    spawn_detached(env, &["proxy"]).map_err(|e| Error::Io(format!("couldn't start pai's local proxy: {e}")))?;
     if wait_for_fingerprint(env, &key, &want) {
         return Ok(());
     }

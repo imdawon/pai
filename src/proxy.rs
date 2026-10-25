@@ -3,6 +3,7 @@
 //! over TLS checked against `pai`'s pins. So coding tools never hold a credential, and nobody
 //! holding a certificate for `api.<domain>`, the relay included, can read what they send.
 
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -11,7 +12,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use pai_proto::{Credential, Period, period_now};
 use serde_json::json;
 use tokio::sync::Notify;
@@ -83,6 +84,26 @@ struct Proxy {
     http: reqwest::Client,
     credential: Mutex<Option<(u32, String)>>,
     stop: Notify,
+    /// Requests still being answered, streamed replies included until their last byte.
+    in_flight: Arc<AtomicUsize>,
+    /// Set when the proxy stopped to make way for an updated `pai`.
+    restart: AtomicBool,
+}
+
+/// Counts a request as in flight until it's dropped.
+struct InFlight(Arc<AtomicUsize>);
+
+impl InFlight {
+    fn new(n: &Arc<AtomicUsize>) -> Self {
+        n.fetch_add(1, Ordering::SeqCst);
+        InFlight(n.clone())
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// Runs the proxy until it's told to stop. Returns at once if another proxy already has the port.
@@ -95,12 +116,12 @@ pub fn run(env: Env) -> Result<()> {
         .worker_threads(2)
         .build()
         .map_err(|e| Error::Io(format!("couldn't start the proxy: {e}")))?;
-    runtime.block_on(async move {
+    let restart = runtime.block_on(async move {
         let http = upstream_client(&env, &config)?;
         let port = port(&env);
         let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
             Ok(l) => l,
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => return Ok(None),
             Err(e) => return Err(Error::Io(format!("couldn't listen on 127.0.0.1:{port}: {e}"))),
         };
         let proxy = Arc::new(Proxy {
@@ -112,16 +133,67 @@ pub fn run(env: Env) -> Result<()> {
             http,
             credential: Mutex::new(None),
             stop: Notify::new(),
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            restart: AtomicBool::new(false),
         });
         if proxy.env.prefetch {
             tokio::spawn(prefetch_loop(proxy.env.clone()));
         }
+        tokio::spawn(update_loop(proxy.clone()));
         let app = Router::new().fallback(handle).with_state(proxy.clone());
+        let stopping = proxy.clone();
         axum::serve(listener, app)
-            .with_graceful_shutdown(async move { proxy.stop.notified().await })
+            .with_graceful_shutdown(async move { stopping.stop.notified().await })
             .await
-            .map_err(|e| Error::Io(format!("the proxy stopped: {e}")))
-    })
+            .map_err(|e| Error::Io(format!("the proxy stopped: {e}")))?;
+        Ok::<_, Error>(proxy.restart.load(Ordering::SeqCst).then(|| proxy.env.clone()))
+    })?;
+    drop(runtime);
+    match restart {
+        Some(env) => restart_proxy(&env),
+        None => Ok(()),
+    }
+}
+
+fn modified(path: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// Starts background update checks when they're due, for machines where the proxy runs for days
+/// and `pai token` rarely does. Once `pai` on disk has been replaced, waits for a moment with no
+/// request in flight and stops, so `run` can start the new one in its place.
+async fn update_loop(p: Arc<Proxy>) {
+    let started_as = modified(&p.env.pai_bin);
+    #[cfg(feature = "test-mode")]
+    let every = p.env.var("PAI_TEST_UPDATE_POLL").and_then(|v| v.parse().ok()).map_or(Duration::from_secs(600), Duration::from_secs);
+    #[cfg(not(feature = "test-mode"))]
+    let every = Duration::from_secs(600);
+    loop {
+        tokio::time::sleep(every).await;
+        let env = p.env.clone();
+        let _ = tokio::task::spawn_blocking(move || crate::update::start_if_due(&env)).await;
+        if started_as.is_some() && modified(&p.env.pai_bin) != started_as {
+            break;
+        }
+    }
+    while p.in_flight.load(Ordering::SeqCst) > 0 {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    p.restart.store(true, Ordering::SeqCst);
+    p.stop.notify_one();
+}
+
+/// Replaces this proxy with the `pai` now on disk. On Unix it keeps the process ID, so a login
+/// service never sees it exit.
+fn restart_proxy(env: &Env) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let e = std::process::Command::new(&env.pai_bin).arg("proxy").exec();
+        Err(Error::Io(format!("couldn't start the updated pai: {e}")))
+    }
+    #[cfg(not(unix))]
+    app::spawn_detached(env, &["proxy"]).map_err(|e| Error::Io(format!("couldn't start the updated pai: {e}")))
 }
 
 /// Once a period (a day, or an hour on the 1-day trial), at a random time, collect the next
@@ -194,7 +266,15 @@ async fn handle(State(p): State<Arc<Proxy>>, req: Request) -> Response {
             p.stop.notify_one();
             StatusCode::NO_CONTENT.into_response()
         }
-        (_, path) if path.starts_with("/v1/") => forward(p, req).await,
+        (_, path) if path.starts_with("/v1/") => {
+            let guard = InFlight::new(&p.in_flight);
+            let (parts, body) = forward(p, req).await.into_parts();
+            let body = body.into_data_stream().map(move |chunk| {
+                let _ = &guard;
+                chunk
+            });
+            Response::from_parts(parts, Body::from_stream(body))
+        }
         _ => error(StatusCode::NOT_FOUND, "not_found_error", "pai's proxy only forwards the model API, under /v1/."),
     }
 }

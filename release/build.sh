@@ -126,6 +126,9 @@ for bin in "$out"/pai-*; do
 		{ echo "build: $(basename "$bin") doesn't point at relay.$PAI_RELEASE_DOMAIN" >&2; exit 1; }
 done
 
+# What `pai update` reads first, to tell whether there's anything newer. Signed like every file.
+printf '%s\n' "$version" >"$out/VERSION"
+
 (cd "$out" && shasum -a 256 -- * | grep -v ' SHA256SUMS$' >SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS)
 
 step "signing SHA256SUMS"

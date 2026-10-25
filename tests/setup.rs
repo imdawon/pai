@@ -388,7 +388,7 @@ fn rerun_backs_up_and_replaces_the_skill() {
         t.env.clock = pai::app::Clock::Fixed(1_800_000_060);
         setup::run(&t.env, tool, &target(&t, 65536), true).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), SKILL);
-        assert_eq!(backups(dir).len(), 2, "{tool:?}");
+        assert_eq!(backups(dir).len(), 1, "an unchanged file isn't backed up again: {tool:?}");
         let names: Vec<String> = fs::read_dir(dir.parent().unwrap())
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -426,4 +426,29 @@ fn skill_follows_each_harness_config_dir() {
     }
     assert!(base.join("omp-agent/extensions/dawonai.ts").exists());
     assert!(!t.home().join(".claude").exists() && !t.home().join(".omp").exists());
+}
+
+#[test]
+fn refresh_rewrites_only_what_a_new_version_changes() {
+    let t = TestEnv::new();
+    setup::run(&t.env, Tool::ClaudeCode, &target(&t, 65536), true).unwrap();
+    setup::run(&t.env, Tool::Codex, &target(&t, 65536), true).unwrap();
+    let claude = t.home().join(".claude");
+    assert!(backups(&claude).is_empty());
+
+    // The same settings again: nothing written, nothing backed up.
+    let again = setup::run(&t.env, Tool::ClaudeCode, &target(&t, 65536), true).unwrap();
+    assert!(!again.contains("Wrote"), "{again}");
+    assert!(backups(&claude).is_empty());
+
+    // An unknown plan never rewrites anything, so an Agent plan's context can't shrink.
+    assert!(setup::refresh(&t.env, None).is_empty());
+
+    let done = setup::refresh(&t.env, Some(pai_proto::Plan::Agent));
+    let changed: Vec<Tool> = done.iter().filter(|(_, r)| matches!(r, Ok(true))).map(|(t, _)| *t).collect();
+    assert_eq!(changed, vec![Tool::ClaudeCode, Tool::Codex], "only the tools pai set up");
+    let v: Value = serde_json::from_str(&fs::read_to_string(claude.join("settings.json")).unwrap()).unwrap();
+    assert_eq!(v["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "262144");
+    assert_eq!(backups(&claude).len(), 1);
+    assert!(!t.home().join(".config/opencode").exists(), "a tool pai never set up stays untouched");
 }

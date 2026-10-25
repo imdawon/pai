@@ -6,6 +6,7 @@ use pai::app::{self, Env};
 use pai::error::Error;
 use pai::service;
 use pai::setup::{self, Tool};
+use pai::update;
 
 /// Connects coding tools to DawonAI through a local proxy, so they never hold a credential.
 #[cfg(not(feature = "test-mode"))]
@@ -70,6 +71,16 @@ enum Command {
         /// Put the tool's config back as it was before --apply, and remove pai's files
         #[arg(long, conflicts_with = "apply")]
         undo: bool,
+    },
+    /// Install the latest signed pai release, if it's newer. Release builds also do this daily on
+    /// their own; PAI_AUTO_UPDATE=0 turns that off.
+    Update {
+        // The daily background check: no output.
+        #[arg(long, hide = true)]
+        auto: bool,
+        // Run by the new binary after an update: rewrite set-up tools' config as this version would.
+        #[arg(long, hide = true, conflicts_with = "auto")]
+        refresh: bool,
     },
 }
 
@@ -145,6 +156,39 @@ fn run(command: Command) -> Result<(), Error> {
             writeln!(out, "{key}")
                 .and_then(|_| out.flush())
                 .map_err(|e| Error::Io(format!("couldn't write the key: {e}")))?;
+            update::clean_up(&env);
+            update::start_if_due(&env);
+        }
+        Command::Update { refresh: true, .. } => {
+            for (tool, result) in setup::refresh(&env, app::plan_hint(&env)) {
+                match result {
+                    Ok(true) => println!("Updated {}'s settings for this version of pai.", tool.display_name()),
+                    Ok(false) => {}
+                    Err(e) => eprintln!("pai: couldn't update {}'s settings: {e}", tool.display_name()),
+                }
+            }
+        }
+        Command::Update { auto, .. } => {
+            if auto && !update::auto_enabled(&env) {
+                return Ok(());
+            }
+            match update::run(&env) {
+                Ok(update::Outcome::UpToDate) if !auto => println!("pai {} is the latest release.", update::VERSION),
+                Ok(update::Outcome::UpToDate) => {}
+                Ok(update::Outcome::Updated { from, to }) => {
+                    // The new binary rewrites the settings, so they come out as the new version writes them.
+                    let refreshed = std::process::Command::new(&env.pai_bin).args(["update", "--refresh"]).output();
+                    if !auto {
+                        println!("Updated pai from {from} to {to}.");
+                        if let Ok(out) = refreshed {
+                            print!("{}", String::from_utf8_lossy(&out.stdout));
+                            eprint!("{}", String::from_utf8_lossy(&out.stderr));
+                        }
+                    }
+                }
+                Err(_) if auto => {}
+                Err(e) => return Err(e),
+            }
         }
         Command::Proxy => pai::proxy::run(env)?,
         Command::Status => print!("{}", app::status(&env)?),

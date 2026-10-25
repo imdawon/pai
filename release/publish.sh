@@ -8,7 +8,9 @@
 # release/current-api-pin (the box's TLS key belongs to its service users, so nothing here can read
 # it); the spare one is release/spare-api-pin (its private key stays offline, see
 # pai-gateway/deploy/CERTIFICATES.md). Both files are public.
-# Needs ../privacy-ai, node, and wrangler signed in to the Cloudflare account with the Pages project.
+# Then copies it to the box, which serves it at https://api.<domain>/pai/latest/ for `pai update`.
+# Needs ../privacy-ai, node, wrangler signed in to the Cloudflare account with the Pages project, and
+# SSH to the box as its admin (PAI_BOX, PAI_BOX_KEY, as pai-gateway/deploy/deploy.sh uses).
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -70,5 +72,20 @@ for f in $(awk '{ print $2 }' "$dist/latest/SHA256SUMS") SHA256SUMS SHA256SUMS.s
 	fi
 done
 [ "$ok" = 1 ] || fail "the site doesn't serve this release yet; Pages can take a minute, then run the check again"
+step "copying to the box, for pai update"
+box="${PAI_BOX:-supercomputer@100.126.243.95}"
+box_key="${PAI_BOX_KEY:-$HOME/.ssh/id_supercomputer}"
+releases=/mnt/re/pai/releases
+on_box() { ssh -i "$box_key" -o IdentitiesOnly=yes "$box" "$@"; }
+on_box test -w "$releases" || fail "$box has no $releases it can write to. Deploy the gateway first (pai-gateway/deploy/deploy.sh), which makes it"
+on_box "rm -rf $releases/latest.new && mkdir $releases/latest.new"
+scp -i "$box_key" -o IdentitiesOnly=yes -q "$dist/latest"/* "$box:$releases/latest.new/"
+on_box "rm -f $releases/latest.new/index.html"
+# One rename, so pai never sees half of one release and half of another.
+on_box "cd $releases && rm -rf latest.old && { [ ! -e latest ] || mv latest latest.old; } && mv latest.new latest && rm -rf latest.old"
+api_version="$(curl -fsS "https://api.$domain/pai/latest/VERSION" || true)"
+[ "$api_version" = "$version" ] || fail "https://api.$domain/pai/latest/VERSION says '$api_version', not $version. Is the gateway deployed with PAI_RELEASES_DIR?"
+echo "ok    https://api.$domain/pai/latest/VERSION"
+
 echo
-echo "pai $version is live at https://$domain/pai/latest/"
+echo "pai $version is live at https://$domain/pai/latest/, and installed copies update to it within a day"

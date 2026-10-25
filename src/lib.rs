@@ -10,3 +10,4 @@ pub mod proxy;
 pub mod relay;
 pub mod service;
 pub mod setup;
+pub mod update;

@@ -54,6 +54,7 @@ Or paste `skill/dawonai/SKILL.md` into your coding agent, and it does all of thi
 | `pai status` | Paired or not, account, plan, device, credentials for today and tomorrow, pins, and whether the proxy is running. Never prints secrets. |
 | `pai unpair` | Stops the proxy and removes the login service, removes the device from your account, then deletes its keys, credentials and config here, even if the relay can't be reached. |
 | `pai setup <claude-code\|codex\|opencode\|omp\|hermes> [--apply\|--undo]` | Prints the tool's config and where the DawonAI skill goes. `--apply` writes both and backs up any file it changes to `<file>.pai-backup-<time>`. `--undo` puts each changed file back from its first backup (or removes it, if pai made it) and deletes pai's own files and the skill. |
+| `pai update` | Installs the latest release if it's newer. Release builds also do this on their own, once a day, in the background. See [Updates](#updates). |
 | `pai service <install\|uninstall\|status>` | Runs the proxy whenever you're logged in, for tools that can't run `pai token` themselves. A LaunchAgent on macOS, a systemd user service on Linux. Not on Windows yet. |
 
 The relay and API default to `https://relay.privacyai.example` and `https://api.privacyai.example`. Override them at pairing with the flags or `PAI_RELAY_URL` / `PAI_API_URL`. The DawonAI web app's address is `app.<domain>` for a relay at `relay.<domain>`, and `https://app.privacyai.example` for any other relay; `--app` or `PAI_APP_URL` sets it.
@@ -63,6 +64,7 @@ The relay and API default to `https://relay.privacyai.example` and `https://api.
 | `PAI_PROXY_PORT` | The proxy's port, `47821` by default. Run `pai setup` again after changing it. |
 | `PAI_PREFETCH=0` | Stops the proxy collecting tomorrow's credential ahead. |
 | `PAI_OPEN_BROWSER=0` | Stops `pai` opening the DawonAI web app when this computer's device link is removed. |
+| `PAI_AUTO_UPDATE=0` | Stops the daily background update. `pai update` still works. |
 
 Each release carries the pins for the model API's key, plus a spare for when the box's key changes. Building or testing `pai` against a staging service, with a staging build, is covered in `docs/TESTING.md`.
 
@@ -78,10 +80,19 @@ Errors go to stderr. `pai token` exits with 2 when not paired, 3 when the plan i
 | Relay URL, API URL, web app URL, device ID, account ID | `pai/config.json` in the OS config directory (`~/Library/Application Support`, `%APPDATA%`, `~/.config`) |
 | Lock that stops parallel `pai token` calls fetching twice | `pai/token.lock` next to the config |
 | The UTC day `pai` last opened the web app for a removed device | `pai/web-app-opened` next to the config |
+| When the next background update check is due | `pai/update.json` next to the config |
 
 On a headless Linux machine without a Secret Service, `pai` stops with an error. Set `PAI_KEYSTORE=file` to keep the secrets in `~/.config/pai/secrets.json` instead, with mode 0600 and no encryption. `PAI_CONFIG_DIR` moves all of these files to one directory.
 
 **Why tomorrow's credential is collected ahead.** Collecting a credential is signed with this device's key, so the relay knows which account asked. If `pai` collected it just before your tool used it, someone watching the relay could match the two by time and tie that day's requests to your account. Collecting it at a random time the day before breaks that link. Set `PAI_PREFETCH=0` to turn this off.
+
+## Updates
+
+Once a day, at a random time, the first `pai token` (or a running proxy) starts `pai update` in the background. It asks the model API, `https://api.<domain>/pai/latest/`, over the same pinned connection as your requests, so the check goes through the relay like any request and carries no credential.
+
+`pai` installs a release only if `SHA256SUMS` is signed by the release key built into it and the file matches its hash there, and never one older than itself. It writes the new binary next to the old one and renames it into place. A running proxy moves to the new binary once no request is in flight. Then the new `pai` rewrites the settings of the coding tools you set up with `--apply`, when a release changes them (the context window, for example), backing up each file it changes.
+
+A build from source never updates itself. `pai` 0.1.3 and earlier can't update: install again once with the command from the DawonAI web app.
 
 ## Coding tools
 

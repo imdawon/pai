@@ -94,6 +94,11 @@ fn backup(path: &Path, now: i64) -> Result<Option<PathBuf>> {
 }
 
 fn write_file(path: &Path, content: &str, now: i64, log: &mut String) -> Result<()> {
+    // Unchanged files are left alone, so running --apply again (or an update refreshing it) makes
+    // no backup and no change.
+    if fs::read(path).is_ok_and(|have| have == content.as_bytes()) {
+        return Ok(());
+    }
     if let Some(b) = backup(path, now)? {
         log.push_str(&format!(
             "Backed up {} to {}\n",
@@ -214,7 +219,7 @@ impl Tool {
         }
     }
 
-    fn display_name(self) -> &'static str {
+    pub fn display_name(self) -> &'static str {
         match self {
             Tool::ClaudeCode => "Claude Code",
             Tool::Codex => "Codex",
@@ -243,6 +248,36 @@ fn applied_files(env: &Env, tool: Tool) -> (Vec<PathBuf>, Vec<PathBuf>) {
     }
 }
 
+const TOOLS: [Tool; 5] = [Tool::ClaudeCode, Tool::Codex, Tool::Opencode, Tool::Omp, Tool::Hermes];
+
+/// Whether a tool's config file has pai's settings in it: the provider pai adds, or (Claude Code,
+/// which has no providers) pai as its API key command.
+fn has_pai_settings(env: &Env, text: &str) -> bool {
+    text.contains(PROVIDER_ID) || text.contains(&format!("{} token", shell_word(&env.pai_bin.to_string_lossy())))
+}
+
+/// Whether `pai setup <tool> --apply` has set this tool up and it's still set up.
+fn is_set_up(env: &Env, tool: Tool) -> bool {
+    let (changed, added) = applied_files(env, tool);
+    changed.iter().any(|p| fs::read_to_string(p).is_ok_and(|t| has_pai_settings(env, &t))) || added.iter().any(|p| p.exists())
+}
+
+/// After an update: writes each tool's config again, as this version of pai would, for the tools
+/// pai set up. Settings written as values (the context window) change with releases, and a new
+/// binary alone doesn't change them. Only files that differ are touched, each backed up first.
+/// Skipped when the plan isn't known, so a lost plan never shrinks an Agent plan's context.
+pub fn refresh(env: &Env, plan: Option<Plan>) -> Vec<(Tool, Result<bool>)> {
+    let target = Target::resolve(env, plan);
+    if !target.plan_known {
+        return Vec::new();
+    }
+    TOOLS
+        .into_iter()
+        .filter(|t| is_set_up(env, *t))
+        .map(|t| (t, run(env, t, &target, true).map(|log| log.contains("\nWrote ") || log.starts_with("Wrote "))))
+        .collect()
+}
+
 /// The first backup `--apply` made of `path`: the file as it was before pai changed it.
 fn oldest_backup(path: &Path) -> Option<PathBuf> {
     let dir = path.parent()?;
@@ -266,7 +301,7 @@ pub fn undo(env: &Env, tool: Tool) -> Result<String> {
     let (changed, added) = applied_files(env, tool);
     for path in changed {
         match oldest_backup(&path) {
-            Some(b) if !fs::read_to_string(&b).unwrap_or_default().contains(PROVIDER_ID) => {
+            Some(b) if !has_pai_settings(env, &fs::read_to_string(&b).unwrap_or_default()) => {
                 fs::copy(&b, &path).map_err(|e| io_err("restore", &path, e))?;
                 log.push_str(&format!("Restored {} from {}\n", path.display(), b.display()));
             }

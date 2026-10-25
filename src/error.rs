@@ -21,6 +21,7 @@ pub enum Error {
     Keystore(String),
     Io(String),
     Setup(String),
+    Update(String),
 }
 
 impl Error {
@@ -118,6 +119,7 @@ impl fmt::Display for Error {
             Error::Keystore(msg) => write!(f, "couldn't use the keychain: {msg}"),
             Error::Io(msg) => write!(f, "{msg}"),
             Error::Setup(msg) => write!(f, "{msg}"),
+            Error::Update(msg) => write!(f, "couldn't update pai: {msg}"),
         }
     }
 }
