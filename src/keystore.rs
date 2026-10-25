@@ -36,10 +36,12 @@ impl Keystore {
     /// never registers a device whose key it then can't keep.
     pub fn check(&self) -> Result<()> {
         match self {
-            Keystore::Os => match keyring::Entry::store_status() {
-                Ok(()) => Ok(()),
-                Err(e) => Err(Error::KeychainUnavailable(e.to_string())),
-            },
+            Keystore::Os => {
+                if let Err(e) = keyring::Entry::store_status() {
+                    return Err(Error::KeychainUnavailable(e.to_string()));
+                }
+                macos_keychain_reachable()
+            }
             Keystore::File(_) => Ok(()),
         }
     }
@@ -60,7 +62,10 @@ impl Keystore {
 
     pub fn set(&self, name: &str, value: &str) -> Result<()> {
         match self {
-            Keystore::Os => os_entry(name)?.set_password(value).map_err(os_error),
+            Keystore::Os => {
+                macos_keychain_reachable()?;
+                os_entry(name)?.set_password(value).map_err(os_error)
+            }
             Keystore::File(path) => {
                 let mut map = read_file(path)?;
                 map.insert(name.to_string(), value.to_string());
@@ -88,6 +93,29 @@ impl Keystore {
             }
         }
     }
+}
+
+/// Asks the default keychain for an item that doesn't exist, with keychain dialogs turned off.
+/// When macOS can't reach the keychain (pai run inside a sandbox, or over SSH), saving to it would
+/// show "Keychain Not Found" with a Reset To Defaults button, which replaces the user's login
+/// keychain. With dialogs off, macOS returns an error here instead, and pai stops before saving.
+#[cfg(target_os = "macos")]
+fn macos_keychain_reachable() -> Result<()> {
+    use security_framework::os::macos::keychain::SecKeychain;
+    const ITEM_NOT_FOUND: i32 = -25300;
+    let unreachable = |detail: String| Error::KeychainUnavailable(detail.trim_end_matches('.').to_string());
+    let _no_dialogs = SecKeychain::disable_user_interaction().map_err(|e| unreachable(e.to_string()))?;
+    let keychain = SecKeychain::default().map_err(|e| unreachable(e.to_string()))?;
+    match keychain.find_generic_password("dawonai-keychain-check", "check") {
+        Ok(_) => Ok(()),
+        Err(e) if e.code() == ITEM_NOT_FOUND => Ok(()),
+        Err(e) => Err(unreachable(e.to_string())),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_keychain_reachable() -> Result<()> {
+    Ok(())
 }
 
 fn os_entry(name: &str) -> Result<keyring::Entry> {

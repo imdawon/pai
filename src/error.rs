@@ -111,6 +111,13 @@ impl fmt::Display for Error {
             Error::BadIssuerResponse(msg) => {
                 write!(f, "the relay sent an invalid credential: {msg}")
             }
+            #[cfg(target_os = "macos")]
+            Error::KeychainUnavailable(detail) => write!(
+                f,
+                "pai can't reach your login keychain ({detail}), so it saved nothing. A sandbox, a coding agent or a \
+                 security app may be blocking it: allow pai in that app, or run the command in your own Terminal"
+            ),
+            #[cfg(not(target_os = "macos"))]
             Error::KeychainUnavailable(detail) => write!(
                 f,
                 "the OS keychain isn't available ({detail}). On Linux, start a Secret Service such as gnome-keyring or KeePassXC. \
