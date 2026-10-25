@@ -329,6 +329,7 @@ fn skill_file(t: &TestEnv, tool: Tool) -> std::path::PathBuf {
         Tool::Opencode => t.home().join(".config/opencode/skills"),
         Tool::Omp => t.home().join(".omp/agent/skills"),
         Tool::Hermes => t.home().join(".hermes/skills"),
+        Tool::Other => unreachable!("pai writes no skill for other harnesses"),
     };
     root.join("dawonai").join("SKILL.md")
 }
@@ -451,4 +452,19 @@ fn refresh_rewrites_only_what_a_new_version_changes() {
     assert_eq!(v["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "262144");
     assert_eq!(backups(&claude).len(), 1);
     assert!(!t.home().join(".config/opencode").exists(), "a tool pai never set up stays untouched");
+}
+
+#[test]
+fn other_prints_every_setting_and_writes_nothing() {
+    let t = TestEnv::new();
+    for apply in [false, true] {
+        let out = setup::run(&t.env, Tool::Other, &target(&t, 131072), apply).unwrap();
+        for want in ["http://127.0.0.1:47821/v1", "qwen3.8-27b", "131072 tokens", "32000 tokens", "/opt/pai/bin/pai token"] {
+            assert!(out.contains(want), "{want} in {out}");
+        }
+        assert_eq!(out.contains("nothing was changed"), apply, "{out}");
+        assert!(!out.contains("--undo"), "{out}");
+    }
+    assert!(!t.home().exists(), "writes nothing");
+    assert!(setup::undo(&t.env, Tool::Other).unwrap().contains("Nothing to undo"));
 }

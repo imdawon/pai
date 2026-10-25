@@ -21,6 +21,8 @@ pub enum Tool {
     Opencode,
     Omp,
     Hermes,
+    /// Any other harness: prints the settings to copy in, and writes nothing.
+    Other,
 }
 
 /// What every tool's config is built from.
@@ -72,9 +74,10 @@ pub fn run(env: &Env, tool: Tool, target: &Target, apply: bool) -> Result<String
         (Tool::Omp, true) => omp_apply(env, target)?,
         (Tool::Hermes, false) => hermes_print(env, target),
         (Tool::Hermes, true) => hermes_apply(env, target)?,
+        (Tool::Other, apply) => other_print(target, apply),
     };
     out.push_str(&body);
-    if apply {
+    if apply && tool != Tool::Other {
         out.push_str(&format!("To undo this later: pai setup {} --undo\n", tool.cli_name()));
     }
     Ok(out)
@@ -203,6 +206,7 @@ pub fn skill_path(env: &Env, tool: Tool) -> PathBuf {
         Tool::Omp => omp_agent_dir(env).join("skills"),
         // https://hermes-agent.nousresearch.com/docs/user-guide/features/skills
         Tool::Hermes => hermes_dir(env).join("skills"),
+        Tool::Other => env.paths.home.join(".agents").join("skills"),
     };
     root.join(SKILL_NAME).join("SKILL.md")
 }
@@ -216,6 +220,7 @@ impl Tool {
             Tool::Opencode => "opencode",
             Tool::Omp => "omp",
             Tool::Hermes => "hermes",
+            Tool::Other => "other",
         }
     }
 
@@ -226,6 +231,7 @@ impl Tool {
             Tool::Opencode => "OpenCode",
             Tool::Omp => "OMP",
             Tool::Hermes => "Hermes",
+            Tool::Other => "your harness",
         }
     }
 }
@@ -245,6 +251,7 @@ fn applied_files(env: &Env, tool: Tool) -> (Vec<PathBuf>, Vec<PathBuf>) {
         ),
         Tool::Omp => (vec![], vec![omp_extension_path(env)]),
         Tool::Hermes => (vec![hermes_config_path(env)], vec![]),
+        Tool::Other => (vec![], vec![]),
     }
 }
 
@@ -297,6 +304,9 @@ fn oldest_backup(path: &Path) -> Option<PathBuf> {
 /// backup, or removed when pai made it (its first backup already has pai's settings, or there's
 /// none), and pai's own files and skill deleted. Backups are left in place.
 pub fn undo(env: &Env, tool: Tool) -> Result<String> {
+    if tool == Tool::Other {
+        return Ok("Nothing to undo: `pai setup other` writes nothing.\n".into());
+    }
     let mut log = String::new();
     let (changed, added) = applied_files(env, tool);
     for path in changed {
@@ -876,6 +886,33 @@ fn hermes_apply(env: &Env, t: &Target) -> Result<String> {
     skill_apply(env, Tool::Hermes, &mut log)?;
     log.push_str(&hermes_switch_hint());
     Ok(log)
+}
+
+/// For harnesses pai doesn't know: every value the others are set up with, to copy by hand.
+fn other_print(t: &Target, apply: bool) -> String {
+    let key_help = if cfg!(windows) {
+        "If it can only take a fixed key, paste what `pai token` prints, and run `pai token` once after\n\
+         each login so the proxy is running."
+    } else {
+        "If it can only take a fixed key, paste what `pai token` prints, and run `pai service install`\n\
+         so the proxy runs whenever you're logged in."
+    };
+    format!(
+        "{}Settings for your harness:\n\n\
+         OpenAI base URL     {base}/v1      (Chat Completions and Responses)\n\
+         Anthropic base URL  {base}         (Messages)\n\
+         Model               {MODEL}\n\
+         Context window      {} tokens\n\
+         Max output          {} tokens\n\
+         API key command     {} token\n\n\
+         {key_help}\n\
+         That key only works on this computer, through pai.\n",
+        if apply { "pai doesn't write config for this harness, so nothing was changed.\n\n" } else { "" },
+        t.context,
+        t.max_output(),
+        shell_word(&t.pai_bin),
+        base = t.base_url,
+    )
 }
 
 #[cfg(test)]

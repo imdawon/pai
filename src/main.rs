@@ -148,7 +148,7 @@ fn run(command: Command) -> Result<(), Error> {
             if let Some(warning) = app::test_mode_warning(&app::trust(&env, Some(&cfg))) {
                 eprintln!("{warning}");
             }
-            println!("Next: `pai setup <claude-code|codex|opencode|omp|hermes> --apply`.");
+            println!("Next: `pai setup <claude-code|codex|opencode|omp|hermes> --apply`, or `pai setup other` for any other harness.");
         }
         Command::Token => {
             let key = app::token(&env)?;
