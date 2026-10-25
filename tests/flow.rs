@@ -388,3 +388,31 @@ fn prefetch_waits_a_random_time_within_the_period() {
     assert!(app::prefetch_delay(Period::Day, midnight + 86_400 - 600).is_none());
     assert!(app::prefetch_delay(Period::Hour, midnight + 3_600 - 120).is_none());
 }
+
+#[test]
+fn a_new_version_rewrites_set_up_tools_once() {
+    let relay = FakeRelay::start(CODE);
+    let t = paired(&relay);
+    let settings = t.env.paths.home.join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    // As an older pai left it: pai's key command, a 64K window.
+    std::fs::write(
+        &settings,
+        r#"{"apiKeyHelper":"/opt/pai/bin/pai token","env":{"CLAUDE_CODE_MAX_CONTEXT_TOKENS":"65536"}}"#,
+    )
+    .unwrap();
+
+    // No plan held yet: nothing is rewritten, and it tries again next time.
+    pai::update::refresh_settings(&t.env);
+    assert!(std::fs::read_to_string(&settings).unwrap().contains("65536"));
+
+    app::credential(&t.env, false).unwrap();
+    pai::update::refresh_settings(&t.env);
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(v["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], Plan::Chat.max_context().to_string());
+
+    // Once per version: a change the user makes afterwards stays.
+    std::fs::write(&settings, r#"{"apiKeyHelper":"/opt/pai/bin/pai token","env":{"CLAUDE_CODE_MAX_CONTEXT_TOKENS":"1000"}}"#).unwrap();
+    pai::update::refresh_settings(&t.env);
+    assert!(std::fs::read_to_string(&settings).unwrap().contains("1000"));
+}

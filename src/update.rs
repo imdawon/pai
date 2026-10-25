@@ -48,6 +48,9 @@ struct State {
     /// Unix time of the next background check.
     #[serde(default)]
     next_check: i64,
+    /// The version that last rewrote the coding tools' settings (`refresh_settings`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    settings_version: Option<String>,
 }
 
 fn state_file(env: &Env) -> PathBuf {
@@ -78,16 +81,31 @@ pub fn start_if_due(env: &Env) {
         return;
     }
     let now = env.clock.now();
-    if load_state(env).next_check > now {
+    let mut state = load_state(env);
+    if state.next_check > now {
         return;
     }
     // Written before starting, so tools that run `pai token` together start one check between them,
     // and a failing check waits a day like any other.
-    let next = now + CHECK_EVERY + rand::random::<u32>() as i64 % JITTER;
-    if save_state(env, &State { next_check: next }).is_err() {
+    state.next_check = now + CHECK_EVERY + rand::random::<u32>() as i64 % JITTER;
+    if save_state(env, &state).is_err() {
         return;
     }
     let _ = app::spawn_detached(env, &["update", "--auto"]);
+}
+
+/// The first time a version of `pai` runs `pai token`, after an update or a reinstall, it writes the
+/// set-up tools' settings as it would (`setup::refresh`). Once per version, and only once the plan
+/// is known, so a lost plan never shrinks the context.
+pub fn refresh_settings(env: &Env) {
+    let mut state = load_state(env);
+    if state.settings_version.as_deref() == Some(VERSION) {
+        return;
+    }
+    let Some(plan) = app::held_plan(env) else { return };
+    let _ = crate::setup::refresh(env, Some(plan));
+    state.settings_version = Some(VERSION.into());
+    let _ = save_state(env, &state);
 }
 
 pub enum Outcome {

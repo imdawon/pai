@@ -157,10 +157,11 @@ fn run(command: Command) -> Result<(), Error> {
                 .and_then(|_| out.flush())
                 .map_err(|e| Error::Io(format!("couldn't write the key: {e}")))?;
             update::clean_up(&env);
+            update::refresh_settings(&env);
             update::start_if_due(&env);
         }
         Command::Update { refresh: true, .. } => {
-            for (tool, result) in setup::refresh(&env, app::plan_hint(&env)) {
+            for (tool, result) in setup::refresh(&env, app::held_plan(&env).or_else(|| app::plan_hint(&env))) {
                 match result {
                     Ok(true) => println!("Updated {}'s settings for this version of pai.", tool.display_name()),
                     Ok(false) => {}
