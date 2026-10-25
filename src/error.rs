@@ -17,7 +17,10 @@ pub enum Error {
     RelayUnreachable(String),
     Relay { status: u16, message: String },
     BadIssuerResponse(String),
+    #[cfg(target_os = "macos")]
     KeychainUnavailable(String),
+    #[cfg(target_os = "macos")]
+    KeychainLocked,
     Keystore(String),
     Io(String),
     Setup(String),
@@ -33,6 +36,15 @@ impl Error {
             Error::DeviceRemoved => 4,
             Error::RelayUnreachable(_) => 5,
             _ => 1,
+        }
+    }
+
+    /// The keystore itself can't be used, which no command should mistake for "nothing stored".
+    pub fn is_keystore_unavailable(&self) -> bool {
+        match self {
+            #[cfg(target_os = "macos")]
+            Error::KeychainUnavailable(_) | Error::KeychainLocked => true,
+            _ => false,
         }
     }
 }
@@ -114,14 +126,14 @@ impl fmt::Display for Error {
             #[cfg(target_os = "macos")]
             Error::KeychainUnavailable(detail) => write!(
                 f,
-                "pai can't reach your login keychain ({detail}), so it saved nothing. A sandbox, a coding agent or a \
-                 security app may be blocking it: allow pai in that app, or run the command in your own Terminal"
+                "pai couldn't read your login keychain ({detail}), where an earlier pai kept this computer's device key. \
+                 Run this command once in a Terminal window on the Mac, or run `pai unpair` and pair again"
             ),
-            #[cfg(not(target_os = "macos"))]
-            Error::KeychainUnavailable(detail) => write!(
+            #[cfg(target_os = "macos")]
+            Error::KeychainLocked => write!(
                 f,
-                "the OS keychain isn't available ({detail}). On Linux, start a Secret Service such as gnome-keyring or KeePassXC. \
-                 On a headless machine you can set PAI_KEYSTORE=file to keep secrets in ~/.config/pai/secrets.json (mode 0600, not encrypted)"
+                "your login keychain is locked, and an earlier pai kept this computer's device key in it. Unlock it and run \
+                 the same command again (over SSH: `security unlock-keychain`), or run `pai unpair` and pair again"
             ),
             Error::Keystore(msg) => write!(f, "couldn't use the keychain: {msg}"),
             Error::Io(msg) => write!(f, "{msg}"),

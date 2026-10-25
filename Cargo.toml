@@ -1,6 +1,6 @@
 [package]
 name = "pai"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 description = "Gives coding tools a DawonAI day credential without a long-lived API key"
 license = "MIT"
@@ -17,7 +17,6 @@ axum = { version = "0.8", default-features = false, features = ["http1", "tokio"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 sha2 = "0.11"
 base64 = "0.23"
-keyring = "4.2"
 dirs = "7"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -28,6 +27,8 @@ gethostname = "1"
 zeroize = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# Only to move secrets out of the login keychain, where pai before 0.1.6 kept them.
+keyring = "4.2"
 security-framework = "3.7"
 
 [features]

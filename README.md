@@ -76,15 +76,17 @@ Errors go to stderr. `pai token` exits with 2 when not paired, 3 when the plan i
 
 | What | Where |
 |---|---|
-| Device key, today's and tomorrow's credentials, the local proxy key | OS keychain, service `dawonai`: macOS Keychain, Windows Credential Manager, or the Secret Service on Linux |
+| Device key, today's and tomorrow's credentials, the local proxy key | `pai/secrets.json` next to the config, created with mode 0600 on macOS and Linux. On Windows the user profile's own permissions protect it |
 | Relay URL, API URL, web app URL, device ID, account ID | `pai/config.json` in the OS config directory (`~/Library/Application Support`, `%APPDATA%`, `~/.config`) |
 | Lock that stops parallel `pai token` calls fetching twice | `pai/token.lock` next to the config |
 | The UTC day `pai` last opened the web app for a removed device | `pai/web-app-opened` next to the config |
 | When the next background update check is due | `pai/update.json` next to the config |
 
-On a headless Linux machine without a Secret Service, `pai` stops with an error. Set `PAI_KEYSTORE=file` to keep the secrets in `~/.config/pai/secrets.json` instead, with mode 0600 and no encryption. `PAI_CONFIG_DIR` moves all of these files to one directory.
+`PAI_CONFIG_DIR` moves all of these files to one directory.
 
 **Why tomorrow's credential is collected ahead.** Collecting a credential is signed with this device's key, so the relay knows which account asked. If `pai` collected it just before your tool used it, someone watching the relay could match the two by time and tie that day's requests to your account. Collecting it at a random time the day before breaks that link. Set `PAI_PREFETCH=0` to turn this off.
+
+The secrets are a file, not keychain items, on every platform. pai updates itself, and the macOS keychain ties each item to the code signature of the program that saved it, which changed with every release, so each update made the keychain ask permission again and failed over SSH, where nothing can show the prompt. A customer should never notice that pai collects a new credential every day. The file is readable by programs running as you, like any other tool's token file; what it holds can only collect day credentials for this one device, and **Devices** in the DawonAI web app revokes it. pai 0.1.6 moves what an earlier version kept in the macOS keychain into the file the first time it runs, which can ask for permission one last time; if that can't happen over SSH, run any `pai` command once in a Terminal window on the Mac, or `pai unpair` and pair again.
 
 ## Updates
 

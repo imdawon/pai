@@ -80,7 +80,6 @@ fn binary_end_to_end() {
         "http://api.test",
     ]);
     assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(text(&out.stderr).contains("warning: PAI_KEYSTORE=file"));
 
     // `pai token` starts the local proxy and prints the key for it, never a credential.
     let out = cli.run(&["token"]);

@@ -110,7 +110,7 @@ pub fn openable_url(url: &str) -> bool {
 #[derive(Debug, Clone)]
 pub struct Paths {
     pub config_dir: PathBuf,
-    /// Only used with `PAI_KEYSTORE=file`.
+    /// `secrets.json` next to `config.json`: the device key, both day credentials and the proxy key.
     pub secrets_file: PathBuf,
     /// The user's home, where coding tools keep their config.
     pub home: PathBuf,
@@ -149,10 +149,9 @@ impl Paths {
         let config_dir = dirs::config_dir()
             .ok_or_else(|| Error::Io("couldn't find the OS config directory".into()))?
             .join("pai");
-        let secrets_file = home.join(".config").join("pai").join("secrets.json");
         Ok(Paths {
+            secrets_file: config_dir.join("secrets.json"),
             config_dir,
-            secrets_file,
             home,
         })
     }

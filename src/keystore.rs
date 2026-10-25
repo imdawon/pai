@@ -15,20 +15,26 @@ pub const NEXT_CREDENTIAL: &str = "next-day-credential";
 /// The key coding tools send to the local proxy. It only works on this machine.
 pub const PROXY_KEY: &str = "local-proxy-key";
 
-/// Holds the device key and the cached day credential.
+/// Holds the device key and the cached day credentials.
 #[derive(Debug, Clone)]
 pub enum Keystore {
-    /// macOS Keychain, Windows Credential Manager, or the Secret Service on Linux.
+    /// The macOS login keychain, where pai before 0.1.6 kept its secrets. Read only to move them
+    /// into the file: the keychain tied each item to the binary that saved it, and pai's ad-hoc
+    /// signature changes with every update, so each update brought a permission prompt, or a
+    /// failure over SSH, where nothing can show one.
+    #[cfg(target_os = "macos")]
     Os,
-    /// `PAI_KEYSTORE=file`: a 0600 JSON file, for headless machines without a Secret Service.
+    /// `secrets.json` next to `config.json`, created with mode 0600 on Unix. On Windows it relies
+    /// on the user profile's own permissions, like other tools' token files.
     File(PathBuf),
 }
 
 impl Keystore {
     pub fn describe(&self) -> String {
         match self {
+            #[cfg(target_os = "macos")]
             Keystore::Os => "OS keychain".into(),
-            Keystore::File(p) => format!("file {} (PAI_KEYSTORE=file)", p.display()),
+            Keystore::File(p) => format!("file {}", p.display()),
         }
     }
 
@@ -36,11 +42,12 @@ impl Keystore {
     /// never registers a device whose key it then can't keep.
     pub fn check(&self) -> Result<()> {
         match self {
+            #[cfg(target_os = "macos")]
             Keystore::Os => {
                 if let Err(e) = keyring::Entry::store_status() {
                     return Err(Error::KeychainUnavailable(e.to_string()));
                 }
-                macos_keychain_reachable()
+                macos_keychain_ready()
             }
             Keystore::File(_) => Ok(()),
         }
@@ -48,6 +55,7 @@ impl Keystore {
 
     pub fn get(&self, name: &str) -> Result<Option<Zeroizing<String>>> {
         match self {
+            #[cfg(target_os = "macos")]
             Keystore::Os => {
                 let entry = os_entry(name)?;
                 match entry.get_password() {
@@ -62,8 +70,9 @@ impl Keystore {
 
     pub fn set(&self, name: &str, value: &str) -> Result<()> {
         match self {
+            #[cfg(target_os = "macos")]
             Keystore::Os => {
-                macos_keychain_reachable()?;
+                macos_keychain_ready()?;
                 os_entry(name)?.set_password(value).map_err(os_error)
             }
             Keystore::File(path) => {
@@ -76,6 +85,7 @@ impl Keystore {
 
     pub fn delete(&self, name: &str) -> Result<()> {
         match self {
+            #[cfg(target_os = "macos")]
             Keystore::Os => match os_entry(name)?.delete_credential() {
                 Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
                 Err(e) => Err(os_error(e)),
@@ -99,12 +109,18 @@ impl Keystore {
 /// When macOS can't reach the keychain (pai run inside a sandbox, or over SSH), saving to it would
 /// show "Keychain Not Found" with a Reset To Defaults button, which replaces the user's login
 /// keychain. With dialogs off, macOS returns an error here instead, and pai stops before saving.
+/// A locked keychain is refused too: searching one works, so the probe alone passes, but writing
+/// to it asks for its password, which can't happen over SSH, and `pai pair` would find that out
+/// only after spending the pairing code.
 #[cfg(target_os = "macos")]
-fn macos_keychain_reachable() -> Result<()> {
+fn macos_keychain_ready() -> Result<()> {
     use security_framework::os::macos::keychain::SecKeychain;
     const ITEM_NOT_FOUND: i32 = -25300;
     let unreachable = |detail: String| Error::KeychainUnavailable(detail.trim_end_matches('.').to_string());
     let _no_dialogs = SecKeychain::disable_user_interaction().map_err(|e| unreachable(e.to_string()))?;
+    if !mac::default_keychain_unlocked()? {
+        return Err(Error::KeychainLocked);
+    }
     let keychain = SecKeychain::default().map_err(|e| unreachable(e.to_string()))?;
     match keychain.find_generic_password("dawonai-keychain-check", "check") {
         Ok(_) => Ok(()),
@@ -113,11 +129,56 @@ fn macos_keychain_reachable() -> Result<()> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-fn macos_keychain_reachable() -> Result<()> {
-    Ok(())
+#[cfg(target_os = "macos")]
+mod mac {
+    use std::ffi::c_void;
+    use std::ptr;
+
+    use crate::error::{Error, Result};
+
+    #[link(name = "Security", kind = "framework")]
+    unsafe extern "C" {
+        fn SecKeychainCopyDefault(keychain: *mut *mut c_void) -> i32;
+        fn SecKeychainGetStatus(keychain: *mut c_void, status: *mut u32) -> i32;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFRelease(cf: *const c_void);
+    }
+
+    /// kSecUnlockStateStatus
+    const UNLOCKED: u32 = 1;
+
+    pub fn default_keychain_unlocked() -> Result<bool> {
+        let mut keychain: *mut c_void = ptr::null_mut();
+        let status = unsafe { SecKeychainCopyDefault(&mut keychain) };
+        if status != 0 || keychain.is_null() {
+            return Err(Error::KeychainUnavailable(describe(status)));
+        }
+        let unlocked = unlocked(keychain);
+        unsafe { CFRelease(keychain) };
+        unlocked
+    }
+
+    pub fn unlocked(keychain: *mut c_void) -> Result<bool> {
+        let mut state = 0u32;
+        let status = unsafe { SecKeychainGetStatus(keychain, &mut state) };
+        if status != 0 {
+            return Err(Error::KeychainUnavailable(describe(status)));
+        }
+        Ok(state & UNLOCKED != 0)
+    }
+
+    fn describe(code: i32) -> String {
+        security_framework::base::Error::from_code(code)
+            .to_string()
+            .trim_end_matches('.')
+            .to_string()
+    }
 }
 
+#[cfg(target_os = "macos")]
 fn os_entry(name: &str) -> Result<keyring::Entry> {
     keyring::Entry::new(SERVICE, name).map_err(|e| match e {
         keyring::Error::NoDefaultStore => match keyring::Entry::store_status() {
@@ -128,7 +189,13 @@ fn os_entry(name: &str) -> Result<keyring::Entry> {
     })
 }
 
+#[cfg(target_os = "macos")]
 fn os_error(e: keyring::Error) -> Error {
+    if matches!(e, keyring::Error::NoStorageAccess(_) | keyring::Error::PlatformFailure(_))
+        && matches!(mac::default_keychain_unlocked(), Ok(false))
+    {
+        return Error::KeychainLocked;
+    }
     match e {
         keyring::Error::NoStorageAccess(_)
         | keyring::Error::PlatformFailure(_)
@@ -175,12 +242,6 @@ fn write_file(path: &Path, map: &SecretMap) -> Result<()> {
         .parent()
         .ok_or_else(|| Error::Io(format!("bad secrets path {}", path.display())))?;
     fs::create_dir_all(dir).map_err(|e| io_err("create", dir, e))?;
-    if !path.exists() {
-        eprintln!(
-            "warning: PAI_KEYSTORE=file: the device key is stored unencrypted in {} (mode 0600)",
-            path.display()
-        );
-    }
     let text = Zeroizing::new(serde_json::to_string_pretty(&map.0).expect("secrets serialize"));
     let tmp = path.with_extension("json.tmp");
     let _ = fs::remove_file(&tmp);
@@ -198,4 +259,47 @@ fn write_file(path: &Path, map: &SecretMap) -> Result<()> {
         .map_err(|e| io_err("write", &tmp, e))?;
     drop(f);
     fs::rename(&tmp, path).map_err(|e| io_err("write", path, e))
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod mac_tests {
+    use std::ffi::{CString, c_char, c_void};
+    use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+    use std::process::Command;
+    use std::ptr;
+
+    use super::mac;
+
+    #[link(name = "Security", kind = "framework")]
+    unsafe extern "C" {
+        fn SecKeychainOpen(path: *const c_char, keychain: *mut *mut c_void) -> i32;
+    }
+
+    fn security(args: &[&str]) {
+        let status = Command::new("/usr/bin/security").args(args).status().unwrap();
+        assert!(status.success(), "security {args:?} failed");
+    }
+
+    /// A keychain of its own, so the user's login keychain is never locked by a test.
+    #[test]
+    fn a_locked_keychain_is_detected() {
+        let path = std::env::temp_dir().join(format!("pai-test-{}.keychain-db", std::process::id()));
+        let path_str = path.to_str().unwrap();
+        let _ = std::fs::remove_file(&path);
+        security(&["create-keychain", "-p", "pw", path_str]);
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            let c_path = CString::new(path_str).unwrap();
+            let mut keychain: *mut c_void = ptr::null_mut();
+            assert_eq!(unsafe { SecKeychainOpen(c_path.as_ptr(), &mut keychain) }, 0);
+            assert!(mac::unlocked(keychain).unwrap(), "a new keychain starts unlocked");
+            security(&["lock-keychain", path_str]);
+            assert!(!mac::unlocked(keychain).unwrap());
+            security(&["unlock-keychain", "-p", "pw", path_str]);
+            assert!(mac::unlocked(keychain).unwrap());
+        }));
+        security(&["delete-keychain", path_str]);
+        if let Err(e) = outcome {
+            resume_unwind(e);
+        }
+    }
 }

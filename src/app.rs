@@ -60,11 +60,11 @@ impl Env {
             .map(|s| s.trim().to_ascii_lowercase())
             .as_deref()
         {
-            None | Some("") | Some("os") | Some("keychain") => Keystore::Os,
-            Some("file") => Keystore::File(paths.secrets_file.clone()),
+            None | Some("") | Some("file") => Keystore::File(paths.secrets_file.clone()),
             Some(other) => {
                 return Err(Error::Io(format!(
-                    "PAI_KEYSTORE={other} is not supported; use `file` or leave it unset"
+                    "PAI_KEYSTORE={other} is not supported: pai keeps its secrets in {}",
+                    paths.secrets_file.display()
                 )));
             }
         };
@@ -108,6 +108,42 @@ impl Env {
 
     pub fn default_api_url(&self) -> String {
         trim_url(self.var("PAI_API_URL").unwrap_or(DEFAULT_API_URL))
+    }
+
+    /// Moves what a pai before 0.1.6 kept in the macOS keychain into the secrets file, once, so
+    /// the update doesn't ask anyone to pair again. Reading the old items can prompt one last
+    /// time, since the keychain tied them to the binary that saved them.
+    #[cfg(target_os = "macos")]
+    pub fn adopt_keychain_secrets(&self) -> Result<()> {
+        if !self.paths.config_file().exists() || self.keystore.get(DEVICE_KEY)?.is_some() {
+            return Ok(());
+        }
+        let keychain = Keystore::Os;
+        match keychain.check() {
+            Ok(()) => {}
+            Err(Error::KeychainLocked) => return Err(Error::KeychainLocked),
+            // No keychain to read (a sandbox, or a home without one): an earlier pai couldn't
+            // have saved anything in it from here either.
+            Err(_) => return Ok(()),
+        }
+        let Some(device_key) = keychain.get(DEVICE_KEY)? else {
+            return Ok(());
+        };
+        self.keystore.set(DEVICE_KEY, &device_key)?;
+        for name in [CREDENTIAL, NEXT_CREDENTIAL, PROXY_KEY] {
+            if let Some(value) = keychain.get(name)? {
+                self.keystore.set(name, &value)?;
+            }
+        }
+        for name in [DEVICE_KEY, CREDENTIAL, NEXT_CREDENTIAL, PROXY_KEY] {
+            let _ = keychain.delete(name);
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn adopt_keychain_secrets(&self) -> Result<()> {
+        Ok(())
     }
 
     pub fn paired(&self) -> Result<Config> {
@@ -215,6 +251,10 @@ pub fn pair(
     let relay = Relay::new(&relay_url, env.relay_timeout, test.as_ref().map(|t| t.ca.as_path()))?;
 
     let key = SigningKey::generate(&mut rand::rngs::OsRng);
+    // Saved before the code is spent: a code works once, so a failure to save must cost nothing.
+    env.keystore.set(DEVICE_KEY, &Zeroizing::new(b64(key.to_bytes())))?;
+    env.keystore.delete(CREDENTIAL)?;
+    env.keystore.delete(NEXT_CREDENTIAL)?;
     let request = PairRequest {
         code,
         device: NewDevice {
@@ -223,7 +263,13 @@ pub fn pair(
             kind: DeviceKind::Tool,
         },
     };
-    let registered = relay.pair(&request)?;
+    let registered = match relay.pair(&request) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = env.keystore.delete(DEVICE_KEY);
+            return Err(e);
+        }
+    };
 
     let config = Config {
         relay_url,
@@ -233,14 +279,7 @@ pub fn pair(
         account_id: registered.account_id,
         test,
     };
-    let saved = (|| {
-        let seed = Zeroizing::new(b64(key.to_bytes()));
-        env.keystore.set(DEVICE_KEY, &seed)?;
-        env.keystore.delete(CREDENTIAL)?;
-        env.keystore.delete(NEXT_CREDENTIAL)?;
-        config.save(&env.paths.config_file())
-    })();
-    if let Err(e) = saved {
+    if let Err(e) = config.save(&env.paths.config_file()) {
         // Don't leave a registered device behind that nothing on this machine can use.
         let _ = relay.delete_self(&key, &registered.device_id);
         let _ = env.keystore.delete(DEVICE_KEY);
@@ -775,7 +814,7 @@ pub fn unpair(env: &Env) -> Result<Vec<String>> {
     let key = match env.device_key() {
         Ok(k) => Some(k),
         Err(Error::NotPaired) => None,
-        Err(e @ Error::KeychainUnavailable(_)) => return Err(e),
+        Err(e) if e.is_keystore_unavailable() => return Err(e),
         Err(_) => None,
     };
     match (&config, &key) {

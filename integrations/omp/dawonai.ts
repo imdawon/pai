@@ -17,9 +17,11 @@ function paiBin(): string {
   return process.env.PAI_BIN?.trim() || DEFAULT_PAI_BIN;
 }
 
-// OMP runs `!command` keys through a POSIX-style shell (Brush on Windows), which both accept single quotes.
+// OMP runs `!command` keys through a shell. Double quotes are the one form a POSIX shell and
+// cmd.exe both accept, and they keep the backslashes of a Windows path, which an unquoted POSIX
+// command line would strip.
 function shellQuote(s: string): string {
-  return /^[A-Za-z0-9_@%+=:,./\\-]+$/.test(s) ? s : `'${s.replaceAll("'", `'\\''`)}'`;
+  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(s) ? s : `"${s.replace(/["$`]/g, "\\$&")}"`;
 }
 
 export default function dawonAi(pi: ExtensionAPI): void {

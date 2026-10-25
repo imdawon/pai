@@ -142,11 +142,13 @@ fn pretty(v: &Value) -> String {
     s
 }
 
-/// Quotes a path for tools that run their helper through a shell.
+/// Quotes a path for tools that run their helper through a shell. A backslash is never left
+/// bare: Claude Code and OMP run the command through a POSIX-style shell even on Windows, which
+/// would strip it from the path. Double quotes survive both that shell and cmd.exe.
 fn shell_word(s: &str) -> String {
     let plain = s
         .chars()
-        .all(|c| c.is_ascii_alphanumeric() || "_-./:\\@%+=,".contains(c));
+        .all(|c| c.is_ascii_alphanumeric() || "_-./:@%+=,".contains(c));
     if plain {
         s.to_string()
     } else if cfg!(windows) {
@@ -949,7 +951,9 @@ mod tests {
     #[test]
     fn quotes_helper_paths_with_spaces() {
         assert_eq!(shell_word("/usr/local/bin/pai"), "/usr/local/bin/pai");
-        if !cfg!(windows) {
+        if cfg!(windows) {
+            assert_eq!(shell_word(r"C:\Users\buh\pai\pai.exe"), r#""C:\Users\buh\pai\pai.exe""#);
+        } else {
             assert_eq!(shell_word("/a b/it's/pai"), "'/a b/it'\\''s/pai'");
         }
     }

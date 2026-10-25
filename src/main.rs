@@ -112,6 +112,7 @@ fn main() -> ExitCode {
 
 fn run(command: Command) -> Result<(), Error> {
     let env = Env::from_process()?;
+    env.adopt_keychain_secrets()?;
     let config = env.config().ok().flatten();
     if let Some(warning) = app::test_mode_warning(&app::trust(&env, config.as_ref())) {
         eprintln!("{warning}");
