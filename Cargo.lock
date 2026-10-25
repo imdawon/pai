@@ -1548,7 +1548,7 @@ dependencies = [
 
 [[package]]
 name = "pai"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -1568,6 +1568,7 @@ dependencies = [
  "reqwest",
  "rustls",
  "rustls-webpki",
+ "security-framework",
  "serde",
  "serde_json",
  "sha2 0.11.1",

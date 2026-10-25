@@ -67,6 +67,9 @@ enum Command {
         /// Write the config, backing up any file it changes
         #[arg(long)]
         apply: bool,
+        /// Put the tool's config back as it was before --apply, and remove pai's files
+        #[arg(long, conflicts_with = "apply")]
+        undo: bool,
     },
 }
 
@@ -156,7 +159,8 @@ fn run(command: Command) -> Result<(), Error> {
             ServiceAction::Uninstall => service::uninstall(&env)?.iter().for_each(|l| println!("{l}")),
             ServiceAction::Status => print!("{}", service::status(&env)),
         },
-        Command::Setup { tool, apply } => {
+        Command::Setup { tool, undo: true, .. } => print!("{}", setup::undo(&env, tool)?),
+        Command::Setup { tool, apply, .. } => {
             let target = setup::Target::resolve(&env, app::plan_hint(&env));
             print!("{}", setup::run(&env, tool, &target, apply)?);
         }

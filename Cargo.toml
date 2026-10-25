@@ -1,6 +1,6 @@
 [package]
 name = "pai"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "Gives coding tools a DawonAI day credential without a long-lived API key"
 license = "MIT"
@@ -25,6 +25,9 @@ toml_edit = "0.25"
 rand = "0.8"
 gethostname = "1"
 zeroize = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3.7"
 
 [features]
 # Test mode, for staging builds only (docs/TESTING.md). Release builds leave it off, so they have

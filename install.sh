@@ -120,7 +120,26 @@ chmod 0755 "$tmp/pai"
 mv -f "$tmp/pai" "$BIN_DIR/pai"
 echo "Installed $("$BIN_DIR/pai" --version) to $BIN_DIR/pai"
 
+# Put BIN_DIR on the PATH of new shells, in the login shell's startup file. A terminal or coding
+# harness that's already open keeps its PATH, so the note names the full path too.
+# PAI_NO_MODIFY_PATH=1 leaves the startup files alone.
 case ":$PATH:" in
 *":$BIN_DIR:"*) ;;
-*) echo "Note: $BIN_DIR isn't on your PATH. Add it, or run $BIN_DIR/pai directly." ;;
+*)
+	if [ "$BIN_DIR" = "$HOME/.local/bin" ]; then dir_expr='$HOME/.local/bin'; else dir_expr="$BIN_DIR"; fi
+	case "${SHELL##*/}" in
+	zsh) rc="$HOME/.zshrc" ;;
+	bash) if [ "$(uname -s)" = Darwin ]; then rc="$HOME/.bash_profile"; else rc="$HOME/.bashrc"; fi ;;
+	*) rc="$HOME/.profile" ;;
+	esac
+	line="export PATH=\"$dir_expr:\$PATH\""
+	if [ "${PAI_NO_MODIFY_PATH:-0}" = 1 ]; then
+		echo "Note: $BIN_DIR isn't on your PATH. Add it, or run $BIN_DIR/pai directly."
+	elif grep -qsF "$line" "$rc"; then
+		echo "Note: open a new terminal to use pai, or run $BIN_DIR/pai directly."
+	else
+		printf '\n# Added by the pai installer\n%s\n' "$line" >>"$rc"
+		echo "Added $BIN_DIR to your PATH in $rc. Open a new terminal to use pai, or run $BIN_DIR/pai directly."
+	fi
+	;;
 esac

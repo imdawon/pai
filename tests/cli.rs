@@ -128,3 +128,36 @@ fn binary_end_to_end() {
     assert!(relay.state.lock().unwrap().devices.is_empty());
     assert_eq!(cli.run(&["token"]).status.code(), Some(2));
 }
+
+#[test]
+fn setup_undo_puts_the_harness_back() {
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let cli = Cli { dir: tempfile::tempdir().unwrap(), port };
+    let home = cli.dir.path().join("home");
+    let settings = home.join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    std::fs::write(&settings, "{\"theme\":\"mine\"}").unwrap();
+
+    // Set up twice, so the newest backup already has pai's settings.
+    for _ in 0..2 {
+        let out = cli.run(&["setup", "claude-code", "--apply"]);
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        assert!(text(&out.stdout).contains("To undo this later: pai setup claude-code --undo"));
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+    }
+    let out = cli.run(&["setup", "claude-code", "--undo"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(std::fs::read_to_string(&settings).unwrap(), "{\"theme\":\"mine\"}");
+    assert!(!home.join(".claude/skills/dawonai").exists());
+    assert!(text(&out.stdout).contains("Restart Claude Code"), "{}", text(&out.stdout));
+
+    // A file pai made is removed, not restored.
+    let codex = home.join(".codex/config.toml");
+    assert!(cli.run(&["setup", "codex", "--apply"]).status.success());
+    assert!(codex.exists() && home.join(".codex/dawonai.config.toml").exists());
+    assert!(cli.run(&["setup", "codex", "--undo"]).status.success());
+    assert!(!codex.exists() && !home.join(".codex/dawonai.config.toml").exists());
+
+    assert!(text(&cli.run(&["setup", "omp", "--undo"]).stdout).contains("Nothing to undo"));
+    assert!(!cli.run(&["setup", "omp", "--apply", "--undo"]).status.success(), "the two flags conflict");
+}

@@ -74,6 +74,9 @@ pub fn run(env: &Env, tool: Tool, target: &Target, apply: bool) -> Result<String
         (Tool::Hermes, true) => hermes_apply(env, target)?,
     };
     out.push_str(&body);
+    if apply {
+        out.push_str(&format!("To undo this later: pai setup {} --undo\n", tool.cli_name()));
+    }
     Ok(out)
 }
 
@@ -197,6 +200,100 @@ pub fn skill_path(env: &Env, tool: Tool) -> PathBuf {
         Tool::Hermes => hermes_dir(env).join("skills"),
     };
     root.join(SKILL_NAME).join("SKILL.md")
+}
+
+impl Tool {
+    /// The name `pai setup` takes on the command line.
+    pub fn cli_name(self) -> &'static str {
+        match self {
+            Tool::ClaudeCode => "claude-code",
+            Tool::Codex => "codex",
+            Tool::Opencode => "opencode",
+            Tool::Omp => "omp",
+            Tool::Hermes => "hermes",
+        }
+    }
+
+    fn display_name(self) -> &'static str {
+        match self {
+            Tool::ClaudeCode => "Claude Code",
+            Tool::Codex => "Codex",
+            Tool::Opencode => "OpenCode",
+            Tool::Omp => "OMP",
+            Tool::Hermes => "Hermes",
+        }
+    }
+}
+
+/// The files `--apply` changes for a tool (each backed up first) and the ones it adds, besides the
+/// skill.
+fn applied_files(env: &Env, tool: Tool) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    match tool {
+        Tool::ClaudeCode => (vec![claude_settings_path(env)], vec![]),
+        Tool::Codex => (
+            vec![codex_dir(env).join("config.toml")],
+            vec![codex_dir(env).join(format!("{PROVIDER_ID}.config.toml"))],
+        ),
+        Tool::Opencode => (
+            vec![opencode_dir(env).join("opencode.json")],
+            vec![opencode_dir(env).join("plugins").join("dawonai.ts")],
+        ),
+        Tool::Omp => (vec![], vec![omp_extension_path(env)]),
+        Tool::Hermes => (vec![hermes_config_path(env)], vec![]),
+    }
+}
+
+/// The first backup `--apply` made of `path`: the file as it was before pai changed it.
+fn oldest_backup(path: &Path) -> Option<PathBuf> {
+    let dir = path.parent()?;
+    let prefix = format!("{}.pai-backup-", path.file_name()?.to_string_lossy());
+    let mut found: Vec<PathBuf> = fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+        .map(|e| e.path())
+        .collect();
+    // The suffix is a Unix time, so name order is age order.
+    found.sort();
+    found.into_iter().next()
+}
+
+/// Puts the tool back as it was before `pai setup --apply`: each changed file from its first
+/// backup, or removed when pai made it (its first backup already has pai's settings, or there's
+/// none), and pai's own files and skill deleted. Backups are left in place.
+pub fn undo(env: &Env, tool: Tool) -> Result<String> {
+    let mut log = String::new();
+    let (changed, added) = applied_files(env, tool);
+    for path in changed {
+        match oldest_backup(&path) {
+            Some(b) if !fs::read_to_string(&b).unwrap_or_default().contains(PROVIDER_ID) => {
+                fs::copy(&b, &path).map_err(|e| io_err("restore", &path, e))?;
+                log.push_str(&format!("Restored {} from {}\n", path.display(), b.display()));
+            }
+            _ if path.exists() => {
+                fs::remove_file(&path).map_err(|e| io_err("remove", &path, e))?;
+                log.push_str(&format!("Removed {}, which pai made\n", path.display()));
+            }
+            _ => {}
+        }
+    }
+    let skill_dir = skill_path(env, tool).parent().map(Path::to_path_buf);
+    for path in added {
+        if path.exists() {
+            fs::remove_file(&path).map_err(|e| io_err("remove", &path, e))?;
+            log.push_str(&format!("Removed {}\n", path.display()));
+        }
+    }
+    if let Some(dir) = skill_dir.filter(|d| d.exists()) {
+        fs::remove_dir_all(&dir).map_err(|e| io_err("remove", &dir, e))?;
+        log.push_str(&format!("Removed the DawonAI skill ({})\n", dir.display()));
+    }
+    if log.is_empty() {
+        log.push_str(&format!("Nothing to undo: pai hasn't set up {}.\n", tool.display_name()));
+    } else {
+        log.push_str(&format!("Restart {} to go back to how it was. The backups are still there.\n", tool.display_name()));
+    }
+    Ok(log)
 }
 
 fn skill_print(env: &Env, tool: Tool) -> String {

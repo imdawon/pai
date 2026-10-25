@@ -71,7 +71,7 @@ On a headless Linux machine with no keychain, `pai` stops and says so. Tell the 
 | OMP (oh-my-pi) | `pai setup omp --apply` |
 | Hermes Agent | `pai setup hermes --apply` |
 
-If you can't tell which harness you're in, ask the user. `pai setup` points the harness at the proxy, with `pai token` as its key command, and installs this skill as `dawonai`. It backs up every file it changes to `<file>.pai-backup-<time>` and says where. Without `--apply` it only prints what it would write. Pass on any warning it prints, such as an `ANTHROPIC_API_KEY` that would override the setup.
+If you can't tell which harness you're in, ask the user. `pai setup` points the harness at the proxy, with `pai token` as its key command, and installs this skill as `dawonai`. It backs up every file it changes to `<file>.pai-backup-<time>` and says where. `pai setup <harness> --undo` puts the harness back as it was. Without `--apply` it only prints what it would write. Pass on any warning it prints, such as an `ANTHROPIC_API_KEY` that would override the setup.
 
 ### 4. Check it works
 
@@ -119,7 +119,7 @@ After `pai` is updated, the next `pai token` restarts a proxy left running by th
 
 ## Disconnect
 
-`pai unpair` stops the proxy and removes the login service, removes the device from the account, then deletes the device key, credentials and config on this machine, even if the relay can't be reached. It doesn't change the harness's config or remove this skill. The backups from `pai setup` hold the files as they were before.
+`pai unpair` stops the proxy and removes the login service, removes the device from the account, then deletes the device key, credentials and config on this machine, even if the relay can't be reached. It doesn't change the harness's config or remove this skill; `pai setup <harness> --undo` does that.
 
 ## What pai protects, and what it doesn't
 
