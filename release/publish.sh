@@ -4,8 +4,10 @@
 #
 #   PAI_SIGNING_KEY=/Volumes/<drive>/pai-release.key release/publish.sh
 #
-# The API key pins: the current one is read from the box's TLS key over SSH, the spare one from
-# release/spare-api-pin (public; its private key stays offline, see pai-gateway/deploy/CERTIFICATES.md).
+# The API key pins: the current one is the key api.<domain> serves, which must match
+# release/current-api-pin (the box's TLS key belongs to its service users, so nothing here can read
+# it); the spare one is release/spare-api-pin (its private key stays offline, see
+# pai-gateway/deploy/CERTIFICATES.md). Both files are public.
 # Needs ../privacy-ai, node, and wrangler signed in to the Cloudflare account with the Pages project.
 set -eu
 
@@ -14,8 +16,6 @@ root="$(pwd)"
 site="$(cd "$root/../privacy-ai" && pwd)"
 domain="${PAI_DOMAIN:-ai.imdawon.com}"
 project="${PAI_PAGES_PROJECT:-dawonai}"
-box="${PAI_BOX:-supercomputer@100.126.243.95}"
-box_key="${PAI_BOX_KEY:-$HOME/.ssh/id_supercomputer}"
 
 export PAI_RELEASE_DOMAIN="$domain"
 
@@ -27,16 +27,15 @@ command -v node >/dev/null || fail "needs node"
 command -v wrangler >/dev/null || fail "needs wrangler (npm install -g wrangler, then wrangler login)"
 
 step "API key pins"
-current="$(ssh -i "$box_key" -o IdentitiesOnly=yes "$box" \
-	'openssl pkey -in /mnt/re/pai/tls/key.pem -pubout -outform der | openssl dgst -sha256 -binary | base64')"
+current="$(tr -d ' \n' <release/current-api-pin 2>/dev/null || true)"
 spare="$(tr -d ' \n' <release/spare-api-pin 2>/dev/null || true)"
 pin_ok() { printf '%s' "$1" | grep -Eq '^[A-Za-z0-9+/]{43}=$'; }
-pin_ok "$current" || fail "couldn't read the box's key pin over SSH"
+pin_ok "$current" || fail "release/current-api-pin holds no pin"
 pin_ok "$spare" || fail "release/spare-api-pin holds no pin (pai-gateway/deploy/CERTIFICATES.md, step 2)"
 [ "$current" != "$spare" ] || fail "the spare pin is the box's current key; it must be a different key"
 served="$(echo | openssl s_client -connect "api.$domain:443" -servername "api.$domain" 2>/dev/null |
 	openssl x509 -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | base64)"
-[ "$served" = "$current" ] || fail "api.$domain serves a key other than the box's ($served); not building"
+[ "$served" = "$current" ] || fail "api.$domain serves $served, not release/current-api-pin ($current). If the box's key changed on purpose, put the new pin in release/current-api-pin; otherwise something else is answering for api.$domain. Not building."
 echo "current $current"
 echo "spare   $spare"
 
