@@ -49,11 +49,7 @@ dist="$root/dist"
 
 step "site for $domain"
 (cd "$site" && node tools/build.mjs "$domain")
-cp -R "$dist/$version" "$dist/latest" "$site/dist/site/pai/"
-# The release page (release/index.sh) goes in latest/, since the site has its own page at /pai/.
-# Its links are written for /pai/, so they're rewritten for one folder down.
-sed -e 's#href="latest/#href="#g' -e 's#href="\([0-9][^"/]*\)/#href="../\1/#g' -e 's#href="install\.#href="../install.#g' \
-	"$dist/index.html" >"$site/dist/site/pai/latest/index.html"
+sh release/site-files.sh "$site/dist/site"
 
 step "deploying to Cloudflare Pages ($project)"
 wrangler pages deploy "$site/dist/site" --project-name "$project" --branch main --commit-dirty=true
