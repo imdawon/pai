@@ -79,10 +79,13 @@ step "copying to the box, for pai update"
 box="${PAI_BOX:-supercomputer@100.126.243.95}"
 box_key="${PAI_BOX_KEY:-$HOME/.ssh/id_supercomputer}"
 releases=/mnt/re/pai/releases
-on_box() { ssh -i "$box_key" -o IdentitiesOnly=yes "$box" "$@"; }
+# Without that key file, ssh uses your SSH config and agent.
+box_opts=""
+[ -f "$box_key" ] && box_opts="-i $box_key -o IdentitiesOnly=yes"
+on_box() { ssh $box_opts "$box" "$@"; }
 on_box test -w "$releases" || fail "$box has no $releases it can write to. Deploy the gateway first (pai-gateway/deploy/deploy.sh), which makes it"
 on_box "rm -rf $releases/latest.new && mkdir $releases/latest.new"
-scp -i "$box_key" -o IdentitiesOnly=yes -q "$dist/latest"/* "$box:$releases/latest.new/"
+scp $box_opts -q "$dist/latest"/* "$box:$releases/latest.new/"
 on_box "rm -f $releases/latest.new/index.html"
 # One rename, so pai never sees half of one release and half of another.
 on_box "cd $releases && rm -rf latest.old && { [ ! -e latest ] || mv latest latest.old; } && mv latest.new latest && rm -rf latest.old"
