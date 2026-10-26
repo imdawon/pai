@@ -182,13 +182,23 @@ fn client(env: &Env) -> Result<reqwest::blocking::Client> {
     let builder = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(300))
-        .user_agent(concat!("pai/", env!("CARGO_PKG_VERSION")));
+        .user_agent(user_agent());
     let builder = if app::api_url(env).starts_with("https://") {
         builder.use_preconfigured_tls(crate::pin::client_config(&trust.api_pins, trust.test_ca.as_deref())?)
     } else {
         builder.no_proxy()
     };
     builder.build().map_err(|e| Error::Update(format!("couldn't set up the connection: {e}")))
+}
+
+/// pai's version and the release target it was built for, sent only on update requests, so the
+/// operator's dashboard can count installs by version and platform. Model requests carry the
+/// coding tool's own user agent.
+fn user_agent() -> String {
+    match asset() {
+        Some(a) => format!("pai/{VERSION} ({})", a.trim_start_matches("pai-").trim_end_matches(".exe")),
+        None => format!("pai/{VERSION}"),
+    }
 }
 
 fn get(http: &reqwest::blocking::Client, url: &str, limit: u64) -> Result<Vec<u8>> {
@@ -337,6 +347,17 @@ pub fn clean_up(env: &Env) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_requests_name_the_version_and_release_target() {
+        let ua = user_agent();
+        assert!(ua.starts_with(&format!("pai/{VERSION}")), "{ua}");
+        if let Some(a) = asset() {
+            let target = a.trim_start_matches("pai-").trim_end_matches(".exe");
+            assert_eq!(ua, format!("pai/{VERSION} ({target})"));
+            assert!(!target.contains(' ') && !target.contains(')'), "one word the gateway can read: {target}");
+        }
+    }
 
     #[test]
     fn compares_versions() {
