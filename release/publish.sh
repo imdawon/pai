@@ -77,7 +77,7 @@ done
 [ "$ok" = 1 ] || fail "after about 3 minutes the site still doesn't serve this release. Check the Pages deployment, then run release/publish.sh again"
 step "copying to the box, for pai update"
 box="${PAI_BOX:-supercomputer@100.126.243.95}"
-box_key="${PAI_BOX_KEY:-$HOME/.ssh/id_supercomputer}"
+box_key="${PAI_BOX_KEY:-$HOME/.ssh/id_ed25519}"
 releases=/mnt/re/pai/releases
 # Without that key file, ssh uses your SSH config and agent.
 box_opts=""
