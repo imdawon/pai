@@ -24,6 +24,13 @@ struct Seen {
     requests: Vec<(String, Option<String>, bool)>,
     reject_first: bool,
     announce: Option<String>,
+    /// How long a request that takes a stream waits before it's answered.
+    slow: Option<Duration>,
+    /// Stream requests open now, and the most there have been at once.
+    open: usize,
+    most_open: usize,
+    /// How many stream requests to refuse with `429 stream_limit` first.
+    refuse_streams: usize,
 }
 
 /// A fake model API over TLS with a self-signed certificate for `localhost`. It records each
@@ -56,16 +63,38 @@ fn fake_gateway(seen: Arc<Mutex<Seen>>) -> (u16, String, String) {
                     let svc = service_fn(move |req: hyper::Request<Incoming>| {
                         let seen = seen.clone();
                         async move {
+                            let path = req.uri().path().to_string();
+                            let stream = matches!(path.as_str(), "/v1/chat/completions" | "/v1/messages" | "/v1/responses");
                             let auth = req.headers().get("authorization").map(|v| v.to_str().unwrap().to_string());
-                            let mut s = seen.lock().unwrap();
-                            s.requests.push((req.uri().path().to_string(), auth, req.headers().contains_key("x-api-key")));
-                            let (status, body) = if s.reject_first && s.requests.len() == 1 {
-                                (401, r#"{"error":{"type":"invalid_credential","message":"stale"}}"#)
-                            } else {
-                                (200, r#"{"ok":true}"#)
+                            let (status, body, slow, announce) = {
+                                let mut s = seen.lock().unwrap();
+                                s.requests.push((path, auth, req.headers().contains_key("x-api-key")));
+                                let (status, body) = if s.reject_first && s.requests.len() == 1 {
+                                    (401, r#"{"error":{"type":"invalid_credential","message":"stale"}}"#)
+                                } else if stream && s.refuse_streams > 0 {
+                                    s.refuse_streams -= 1;
+                                    (429, r#"{"type":"error","error":{"type":"stream_limit","message":"busy"}}"#)
+                                } else {
+                                    (200, r#"{"ok":true}"#)
+                                };
+                                let open = stream && status == 200;
+                                if open {
+                                    s.open += 1;
+                                    s.most_open = s.most_open.max(s.open);
+                                }
+                                (status, body, open.then_some(s.slow).flatten(), s.announce.clone())
                             };
+                            if let Some(d) = slow {
+                                tokio::time::sleep(d).await;
+                            }
+                            if stream && status == 200 {
+                                seen.lock().unwrap().open -= 1;
+                            }
                             let mut builder = hyper::Response::builder().status(status).header("content-type", "application/json");
-                            if let Some(v) = &s.announce {
+                            if status == 429 {
+                                builder = builder.header("retry-after", "0");
+                            }
+                            if let Some(v) = &announce {
                                 builder = builder.header("pai-latest", v.as_str());
                             }
                             Ok::<_, Infallible>(builder.body(http_body_util::Full::new(bytes::Bytes::from(body))).unwrap())
@@ -211,6 +240,62 @@ fn replaces_a_rejected_credential_once() {
     assert_eq!(s.requests.len(), 2);
     assert_ne!(s.requests[0].1, s.requests[1].1, "a fresh credential on the retry");
     assert_eq!(relay.issued(), 2);
+}
+
+#[test]
+fn holds_requests_over_the_plans_stream_limit() {
+    let seen = Arc::new(Mutex::new(Seen { slow: Some(Duration::from_millis(300)), ..Seen::default() }));
+    let (api_port, ca, pin) = fake_gateway(seen.clone());
+    let (p, _relay) = start(api_port, &ca, &pin);
+
+    // The fake relay issues Chat passes: one stream at a time.
+    let statuses: Vec<u16> = std::thread::scope(|scope| {
+        let sent: Vec<_> = ["/v1/messages", "/v1/chat/completions", "/v1/responses"]
+            .into_iter()
+            .map(|path| scope.spawn(|| p.post(path, Some(&p.key), &[]).0))
+            .collect();
+        sent.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert_eq!(statuses, [200, 200, 200]);
+    let s = seen.lock().unwrap();
+    assert_eq!(s.requests.len(), 3, "each request is sent once");
+    assert_eq!(s.most_open, 1, "never more than the plan's one stream at a time");
+}
+
+#[test]
+fn lets_requests_that_take_no_stream_past_the_queue() {
+    let seen = Arc::new(Mutex::new(Seen { slow: Some(Duration::from_secs(2)), ..Seen::default() }));
+    let (api_port, ca, pin) = fake_gateway(seen.clone());
+    let (p, _relay) = start(api_port, &ca, &pin);
+    // Collect the credential first, so the slow request below doesn't race the token count for it.
+    p.post("/v1/models", Some(&p.key), &[]);
+
+    std::thread::scope(|scope| {
+        let slow = scope.spawn(|| p.post("/v1/messages", Some(&p.key), &[]).0);
+        std::thread::sleep(Duration::from_millis(300));
+        let started = std::time::Instant::now();
+        assert_eq!(p.post("/v1/messages/count_tokens", Some(&p.key), &[]).0, 200);
+        assert!(started.elapsed() < Duration::from_secs(1), "a token count doesn't wait for a stream");
+        assert_eq!(slow.join().unwrap(), 200);
+    });
+}
+
+#[test]
+fn sends_again_when_the_api_refuses_for_its_stream_limit() {
+    let seen = Arc::new(Mutex::new(Seen { refuse_streams: 2, ..Seen::default() }));
+    let (api_port, ca, pin) = fake_gateway(seen.clone());
+    let (p, relay) = start(api_port, &ca, &pin);
+
+    assert_eq!(p.post("/v1/messages", Some(&p.key), &[]).0, 200);
+    assert_eq!(seen.lock().unwrap().requests.len(), 3);
+    assert_eq!(relay.issued(), 1, "the same credential every time");
+
+    // After 5 more tries the refusal goes to the coding tool, which has its own retries.
+    seen.lock().unwrap().refuse_streams = 100;
+    let (status, body) = p.post("/v1/messages", Some(&p.key), &[]);
+    assert_eq!(status, 429);
+    assert_eq!(body["error"]["type"], "stream_limit");
+    assert_eq!(seen.lock().unwrap().requests.len(), 3 + 6);
 }
 
 #[test]

@@ -13,9 +13,9 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures_util::{StreamExt, TryStreamExt};
-use pai_proto::{Credential, Period, period_now};
+use pai_proto::{Credential, Period, Plan, period_now};
 use serde_json::json;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 use crate::app::{self, Env};
 use crate::config::Config;
@@ -24,6 +24,12 @@ use crate::pin;
 
 pub const DEFAULT_PORT: u16 = 47821;
 const MAX_BODY: usize = 32 * 1024 * 1024;
+/// How long a request waits for one of the plan's streams before it gets the 429 the model API
+/// would have given.
+const STREAM_WAIT: Duration = Duration::from_secs(600);
+/// How many times a request the model API refused for its stream limit is sent again. The API
+/// can free a stream a moment after pai has.
+const STREAM_RETRIES: u32 = 5;
 
 pub fn port(env: &Env) -> u16 {
     env.var("PAI_PROXY_PORT").and_then(|p| p.parse().ok()).unwrap_or(DEFAULT_PORT)
@@ -83,6 +89,9 @@ struct Proxy {
     fingerprint: String,
     http: reqwest::Client,
     credential: Mutex<Option<(u32, String)>>,
+    /// The plan's streams and how many there are, so requests over the limit wait here in the
+    /// order they came instead of coming back from the model API as 429s.
+    streams: Mutex<Option<(usize, Arc<Semaphore>)>>,
     stop: Notify,
     /// Requests still being answered, streamed replies included until their last byte.
     in_flight: Arc<AtomicUsize>,
@@ -134,6 +143,7 @@ pub fn run(env: Env) -> Result<()> {
             fingerprint,
             http,
             credential: Mutex::new(None),
+            streams: Mutex::new(None),
             stop: Notify::new(),
             in_flight: Arc::new(AtomicUsize::new(0)),
             restart: AtomicBool::new(false),
@@ -328,6 +338,55 @@ impl Proxy {
             }
         }
     }
+
+    /// Waits for one of the plan's streams, read from the credential this computer holds.
+    async fn stream_slot(&self) -> std::result::Result<OwnedSemaphorePermit, Response> {
+        let credential = self.credential(false).await?;
+        let max = Credential::decode(&credential).map_or(Plan::Chat, |c| c.plan).max_streams();
+        let streams = {
+            let mut s = self.streams.lock().unwrap();
+            match &*s {
+                Some((n, streams)) if *n == max => streams.clone(),
+                // A new plan starts a new count. Streams still open under the old one finish on
+                // their own, and the model API's 429 covers any overlap.
+                _ => s.insert((max, Arc::new(Semaphore::new(max)))).1.clone(),
+            }
+        };
+        match tokio::time::timeout(STREAM_WAIT, streams.acquire_owned()).await {
+            Ok(Ok(slot)) => Ok(slot),
+            _ => {
+                let noun = if max == 1 { "request" } else { "requests" };
+                let mut r = error(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "stream_limit",
+                    format!("Your plan allows {max} {noun} at a time, and that many have been running for 10 minutes. Try again when one finishes."),
+                );
+                r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("2"));
+                Err(r)
+            }
+        }
+    }
+}
+
+/// The requests that hold one of the plan's streams on the model API until their answer ends.
+fn takes_stream(method: &Method, path: &str) -> bool {
+    method == Method::POST && matches!(path, "/v1/chat/completions" | "/v1/messages" | "/v1/responses")
+}
+
+/// Keeps a stream slot until the response's last byte, or until the coding tool drops it.
+fn hold(resp: Response, slot: Option<OwnedSemaphorePermit>) -> Response {
+    let Some(slot) = slot else { return resp };
+    let (parts, body) = resp.into_parts();
+    let body = body.into_data_stream().map(move |chunk| {
+        let _ = &slot;
+        chunk
+    });
+    Response::from_parts(parts, Body::from_stream(body))
+}
+
+fn retry_after(headers: &HeaderMap) -> Duration {
+    let secs = headers.get(header::RETRY_AFTER).and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse().ok());
+    Duration::from_secs(secs.unwrap_or(2).min(5))
 }
 
 const DROPPED: [HeaderName; 9] = [
@@ -366,6 +425,16 @@ fn note_announced_release(p: &Arc<Proxy>, headers: &HeaderMap) {
 
 async fn forward(p: Arc<Proxy>, req: Request) -> Response {
     let (parts, body) = req.into_parts();
+    // The body is read only once the request has a stream, so a waiting request holds nothing
+    // but its place in line.
+    let slot = if takes_stream(&parts.method, parts.uri.path()) {
+        match p.stream_slot().await {
+            Ok(s) => Some(s),
+            Err(r) => return r,
+        }
+    } else {
+        None
+    };
     let body: Bytes = match axum::body::to_bytes(body, MAX_BODY).await {
         Ok(b) => b,
         Err(_) => return error(StatusCode::PAYLOAD_TOO_LARGE, "request_too_large", "The request is larger than 32 MB."),
@@ -379,8 +448,10 @@ async fn forward(p: Arc<Proxy>, req: Request) -> Response {
     let path = parts.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
     let url = format!("{}{path}", p.api);
 
-    for attempt in 0..2 {
-        let credential = match p.credential(attempt == 1).await {
+    // A refused credential is replaced once; a stream-limit refusal is sent again a few times.
+    let (mut refresh, mut refreshed, mut refusals) = (false, false, 0);
+    loop {
+        let credential = match p.credential(std::mem::take(&mut refresh)).await {
             Ok(c) => c,
             Err(r) => return r,
         };
@@ -397,21 +468,27 @@ async fn forward(p: Arc<Proxy>, req: Request) -> Response {
             Err(e) => return unreachable(&p.api, &e),
         };
         note_announced_release(&p, resp.headers());
-        if resp.status() == StatusCode::UNAUTHORIZED && attempt == 0 {
-            let status = resp.status();
-            let resp_headers = resp.headers().clone();
-            let text = resp.bytes().await.unwrap_or_default();
-            if String::from_utf8_lossy(&text).contains("invalid_credential") {
-                continue;
-            }
-            return respond(status, &resp_headers, Body::from(text));
-        }
         let status = resp.status();
         let resp_headers = resp.headers().clone();
-        let stream = resp.bytes_stream().map_err(std::io::Error::other);
-        return respond(status, &resp_headers, Body::from_stream(stream));
+        let may_retry = (status == StatusCode::UNAUTHORIZED && !refreshed)
+            || (status == StatusCode::TOO_MANY_REQUESTS && slot.is_some() && refusals < STREAM_RETRIES);
+        if !may_retry {
+            let stream = resp.bytes_stream().map_err(std::io::Error::other);
+            return hold(respond(status, &resp_headers, Body::from_stream(stream)), slot);
+        }
+        let text = resp.bytes().await.unwrap_or_default();
+        let kind = String::from_utf8_lossy(&text);
+        if status == StatusCode::UNAUTHORIZED && kind.contains("invalid_credential") {
+            (refresh, refreshed) = (true, true);
+            continue;
+        }
+        if status == StatusCode::TOO_MANY_REQUESTS && kind.contains("stream_limit") {
+            refusals += 1;
+            tokio::time::sleep(retry_after(&resp_headers)).await;
+            continue;
+        }
+        return hold(respond(status, &resp_headers, Body::from(text)), slot);
     }
-    error(StatusCode::UNAUTHORIZED, "authentication_error", "The model API refused a fresh credential.")
 }
 
 fn respond(status: StatusCode, headers: &HeaderMap, body: Body) -> Response {
