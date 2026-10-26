@@ -92,6 +92,8 @@ struct Proxy {
     /// The plan's streams and how many there are, so requests over the limit wait here in the
     /// order they came instead of coming back from the model API as 429s.
     streams: Mutex<Option<(usize, Arc<Semaphore>)>>,
+    /// The stream limit the model API last named in `pai-streams`, and the plan it was for.
+    learned_streams: Mutex<Option<(Plan, usize)>>,
     stop: Notify,
     /// Requests still being answered, streamed replies included until their last byte.
     in_flight: Arc<AtomicUsize>,
@@ -209,6 +211,7 @@ pub fn run(env: Env) -> Result<()> {
             http,
             credential: Mutex::new(None),
             streams: Mutex::new(None),
+            learned_streams: Mutex::new(None),
             stop: Notify::new(),
             in_flight: Arc::new(AtomicUsize::new(0)),
             restart: AtomicBool::new(false),
@@ -435,10 +438,15 @@ impl Proxy {
         }
     }
 
-    /// Waits for one of the plan's streams, read from the credential this computer holds.
+    /// Waits for one of the plan's streams: the number the model API last named for this plan, or
+    /// before it has named one, the number built into pai.
     async fn stream_slot(&self) -> std::result::Result<OwnedSemaphorePermit, Response> {
         let credential = self.credential(false).await?;
-        let max = Credential::decode(&credential).map_or(Plan::Chat, |c| c.plan).max_streams();
+        let plan = Credential::decode(&credential).map_or(Plan::Chat, |c| c.plan);
+        let max = match *self.learned_streams.lock().unwrap() {
+            Some((p, n)) if p == plan => n,
+            _ => plan.max_streams(),
+        };
         let streams = {
             let mut s = self.streams.lock().unwrap();
             match &*s {
@@ -498,12 +506,30 @@ const DROPPED: [HeaderName; 9] = [
 ];
 
 fn forwardable(name: &HeaderName) -> bool {
-    !DROPPED.contains(name) && name.as_str() != "x-api-key" && name.as_str() != "keep-alive" && name.as_str() != LATEST
+    !DROPPED.contains(name)
+        && !matches!(name.as_str(), "x-api-key" | "keep-alive" | LATEST | STREAMS)
 }
 
 /// The model API names the latest pai release on every response, so a proxy hears of one on the
 /// next request rather than at the next daily check. Meant for the proxy, not the coding tool.
 const LATEST: &str = "pai-latest";
+
+/// The model API names the plan's stream limit on responses to stream requests, so the local queue
+/// follows the gateway rather than the number built into pai. Meant for the proxy, not the coding
+/// tool.
+const STREAMS: &str = "pai-streams";
+
+/// Most streams pai will take a `pai-streams` header to allow. The gateway enforces its own limit
+/// either way; this only bounds the local queue.
+const MAX_LEARNED_STREAMS: usize = 32;
+
+fn note_stream_limit(p: &Proxy, headers: &HeaderMap, credential: &str) {
+    let Some(n) = headers.get(STREAMS).and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<usize>().ok()) else {
+        return;
+    };
+    let Ok(c) = Credential::decode(credential) else { return };
+    *p.learned_streams.lock().unwrap() = Some((c.plan, n.clamp(1, MAX_LEARNED_STREAMS)));
+}
 
 fn note_announced_release(p: &Arc<Proxy>, headers: &HeaderMap) {
     let Some(announced) = headers.get(LATEST).and_then(|v| v.to_str().ok()) else { return };
@@ -564,6 +590,7 @@ async fn forward(p: Arc<Proxy>, req: Request) -> Response {
             Err(e) => return unreachable(&p.api, &e),
         };
         note_announced_release(&p, resp.headers());
+        note_stream_limit(&p, resp.headers(), &credential);
         let status = resp.status();
         let resp_headers = resp.headers().clone();
         let may_retry = (status == StatusCode::UNAUTHORIZED && !refreshed)

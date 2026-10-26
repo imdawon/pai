@@ -31,6 +31,8 @@ struct Seen {
     most_open: usize,
     /// How many stream requests to refuse with `429 stream_limit` first.
     refuse_streams: usize,
+    /// The stream limit to name in `pai-streams` on every response.
+    streams_header: Option<String>,
 }
 
 /// A fake model API over TLS with a self-signed certificate for `localhost`. It records each
@@ -66,7 +68,7 @@ fn fake_gateway(seen: Arc<Mutex<Seen>>) -> (u16, String, String) {
                             let path = req.uri().path().to_string();
                             let stream = matches!(path.as_str(), "/v1/chat/completions" | "/v1/messages" | "/v1/responses");
                             let auth = req.headers().get("authorization").map(|v| v.to_str().unwrap().to_string());
-                            let (status, body, slow, announce) = {
+                            let (status, body, slow, announce, limit) = {
                                 let mut s = seen.lock().unwrap();
                                 s.requests.push((path, auth, req.headers().contains_key("x-api-key")));
                                 let (status, body) = if s.reject_first && s.requests.len() == 1 {
@@ -82,7 +84,7 @@ fn fake_gateway(seen: Arc<Mutex<Seen>>) -> (u16, String, String) {
                                     s.open += 1;
                                     s.most_open = s.most_open.max(s.open);
                                 }
-                                (status, body, open.then_some(s.slow).flatten(), s.announce.clone())
+                                (status, body, open.then_some(s.slow).flatten(), s.announce.clone(), s.streams_header.clone())
                             };
                             if let Some(d) = slow {
                                 tokio::time::sleep(d).await;
@@ -96,6 +98,9 @@ fn fake_gateway(seen: Arc<Mutex<Seen>>) -> (u16, String, String) {
                             }
                             if let Some(v) = &announce {
                                 builder = builder.header("pai-latest", v.as_str());
+                            }
+                            if let Some(v) = &limit {
+                                builder = builder.header("pai-streams", v.as_str());
                             }
                             Ok::<_, Infallible>(builder.body(http_body_util::Full::new(bytes::Bytes::from(body))).unwrap())
                         }
@@ -248,18 +253,51 @@ fn holds_requests_over_the_plans_stream_limit() {
     let (api_port, ca, pin) = fake_gateway(seen.clone());
     let (p, _relay) = start(api_port, &ca, &pin);
 
-    // The fake relay issues Chat passes: one stream at a time.
-    let statuses: Vec<u16> = std::thread::scope(|scope| {
-        let sent: Vec<_> = ["/v1/messages", "/v1/chat/completions", "/v1/responses"]
-            .into_iter()
-            .map(|path| scope.spawn(|| p.post(path, Some(&p.key), &[]).0))
-            .collect();
-        sent.into_iter().map(|h| h.join().unwrap()).collect()
-    });
-    assert_eq!(statuses, [200, 200, 200]);
+    // The fake relay issues Chat passes, and this API names no limit, so pai uses its own: 3.
+    let statuses = send_at_once(&p, 5);
+    assert_eq!(statuses, [200; 5]);
     let s = seen.lock().unwrap();
-    assert_eq!(s.requests.len(), 3, "each request is sent once");
-    assert_eq!(s.most_open, 1, "never more than the plan's one stream at a time");
+    assert_eq!(s.requests.len(), 5, "each request is sent once");
+    assert_eq!(s.most_open, 3, "never more than the plan's 3 streams at a time");
+}
+
+#[test]
+fn follows_the_stream_limit_the_api_names() {
+    let seen = Arc::new(Mutex::new(Seen {
+        slow: Some(Duration::from_millis(300)),
+        streams_header: Some("2".into()),
+        ..Seen::default()
+    }));
+    let (api_port, ca, pin) = fake_gateway(seen.clone());
+    let (p, _relay) = start(api_port, &ca, &pin);
+
+    assert_eq!(p.post("/v1/messages", Some(&p.key), &[]).0, 200);
+    assert_eq!(send_at_once(&p, 4), [200; 4]);
+    assert_eq!(seen.lock().unwrap().most_open, 2, "the API's number, not the one built into pai");
+}
+
+#[test]
+fn a_named_limit_of_zero_still_allows_one() {
+    let seen = Arc::new(Mutex::new(Seen {
+        slow: Some(Duration::from_millis(200)),
+        streams_header: Some("0".into()),
+        ..Seen::default()
+    }));
+    let (api_port, ca, pin) = fake_gateway(seen.clone());
+    let (p, _relay) = start(api_port, &ca, &pin);
+
+    assert_eq!(p.post("/v1/messages", Some(&p.key), &[]).0, 200);
+    assert_eq!(send_at_once(&p, 3), [200; 3]);
+    assert_eq!(seen.lock().unwrap().most_open, 1);
+}
+
+/// Sends `n` stream requests at once and returns their statuses.
+fn send_at_once(p: &Running, n: usize) -> Vec<u16> {
+    let paths = ["/v1/messages", "/v1/chat/completions", "/v1/responses"];
+    std::thread::scope(|scope| {
+        let sent: Vec<_> = (0..n).map(|i| scope.spawn(move || p.post(paths[i % 3], Some(&p.key), &[]).0)).collect();
+        sent.into_iter().map(|h| h.join().unwrap()).collect()
+    })
 }
 
 #[test]
