@@ -192,67 +192,123 @@ fn refuses_a_version_file_that_isnt_the_signed_one() {
     assert!(unchanged(&i.bin));
 }
 
-#[test]
-fn a_running_proxy_moves_to_the_new_binary_in_the_same_process() {
-    let i = install(&keypair());
-    let config_dir = i.dir.path().join("config");
-    pai::config::Config {
-        relay_url: "http://127.0.0.1:9".into(),
-        api_url: "http://127.0.0.1:9".into(),
-        app_url: None,
-        device_id: "dev_1".into(),
-        account_id: "acct_1".into(),
-        test: None,
-    }
-    .save(&config_dir.join("config.json"))
-    .unwrap();
-    let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    let mut proxy = Command::new(&i.bin)
-        .arg("proxy")
-        .env_clear()
-        .env("HOME", i.dir.path().join("home"))
-        .env("PAI_CONFIG_DIR", &config_dir)
-        .env("PAI_KEYSTORE", "file")
-        .env("PAI_PREFETCH", "0")
-        .env("PAI_PROXY_PORT", port.to_string())
-        .env("PAI_TEST_UPDATE_POLL", "1")
-        .spawn()
+/// A paired `pai proxy` running from an installed binary, which notices a new binary within a second.
+struct RunningProxy {
+    child: std::process::Child,
+    port: u16,
+    keystore: pai::keystore::Keystore,
+}
+
+impl RunningProxy {
+    fn start(i: &Install) -> RunningProxy {
+        let config_dir = i.dir.path().join("config");
+        pai::config::Config {
+            relay_url: "http://127.0.0.1:9".into(),
+            api_url: "http://127.0.0.1:9".into(),
+            app_url: None,
+            device_id: "dev_1".into(),
+            account_id: "acct_1".into(),
+            test: None,
+        }
+        .save(&config_dir.join("config.json"))
         .unwrap();
-    let keystore = pai::keystore::Keystore::File(config_dir.join("secrets.json"));
-    let health = || -> Option<String> {
-        let key = keystore.get(pai::keystore::PROXY_KEY).ok()??;
-        let r = reqwest::blocking::Client::builder()
-            .no_proxy()
-            .build()
-            .unwrap()
-            .get(format!("http://127.0.0.1:{port}/pai/health"))
-            .bearer_auth(key.to_string())
-            .send()
-            .ok()?;
-        r.json::<serde_json::Value>().ok()?["pai"].as_str().map(str::to_string)
-    };
-    let wait = |f: &dyn Fn(Option<String>) -> bool| {
+        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let child = Command::new(&i.bin)
+            .arg("proxy")
+            .env_clear()
+            .env("HOME", i.dir.path().join("home"))
+            .env("PAI_CONFIG_DIR", &config_dir)
+            .env("PAI_KEYSTORE", "file")
+            .env("PAI_PREFETCH", "0")
+            .env("PAI_PROXY_PORT", port.to_string())
+            .env("PAI_TEST_UPDATE_POLL", "1")
+            .spawn()
+            .unwrap();
+        let p = RunningProxy { child, port, keystore: pai::keystore::Keystore::File(config_dir.join("secrets.json")) };
+        assert!(p.wait_for(|h| h.is_some()), "the proxy started");
+        p
+    }
+
+    fn health_with(&self, http: &reqwest::blocking::Client) -> reqwest::Result<String> {
+        let key = self.keystore.get(pai::keystore::PROXY_KEY).unwrap().unwrap();
+        let r = http.get(format!("http://127.0.0.1:{}/pai/health", self.port)).bearer_auth(key.to_string()).send()?;
+        Ok(r.json::<serde_json::Value>()?["pai"].as_str().unwrap_or_default().to_string())
+    }
+
+    fn health(&self) -> Option<String> {
+        self.keystore.get(pai::keystore::PROXY_KEY).ok()??;
+        self.health_with(&reqwest::blocking::Client::builder().no_proxy().build().unwrap()).ok()
+    }
+
+    fn wait_for(&self, f: impl Fn(Option<String>) -> bool) -> bool {
         for _ in 0..100 {
-            if f(health()) {
+            if f(self.health()) {
                 return true;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         false
-    };
-    assert!(wait(&|h| h.is_some()), "the proxy started");
-    let before = health().unwrap();
+    }
 
-    // What an update does: a new file renamed over the old one.
-    let tmp = i.bin.with_file_name(".pai.new");
-    fs::write(&tmp, fs::read(&i.bin).unwrap()).unwrap();
-    fs::set_permissions(&tmp, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    fs::rename(&tmp, &i.bin).unwrap();
+    /// What an update does: a new file renamed over the old one.
+    fn replace_binary(i: &Install) {
+        let tmp = i.bin.with_file_name(".pai.new");
+        fs::write(&tmp, fs::read(&i.bin).unwrap()).unwrap();
+        fs::set_permissions(&tmp, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        fs::rename(&tmp, &i.bin).unwrap();
+    }
+}
 
-    let moved = wait(&|h| h.is_some_and(|h| h != before));
-    let still_running = proxy.try_wait().unwrap().is_none();
-    let _ = proxy.kill();
-    let _ = proxy.wait();
-    assert!(moved, "the proxy restarted on the new binary");
+impl Drop for RunningProxy {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+fn a_running_proxy_answers_throughout_its_move_to_the_new_binary() {
+    let i = install(&keypair());
+    let p = RunningProxy::start(&i);
+    let before = p.health().unwrap();
+
+    // A coding tool sending one request after another, on connections it keeps open, as Node's
+    // fetch does. Every request must be answered, by the old proxy or the new one.
+    let done = std::sync::atomic::AtomicBool::new(false);
+    let (answered, failures) = std::thread::scope(|s| {
+        let tool = s.spawn(|| {
+            let http = reqwest::blocking::Client::builder().no_proxy().build().unwrap();
+            let (mut answered, mut failures) = (0, Vec::new());
+            while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                match p.health_with(&http) {
+                    Ok(_) => answered += 1,
+                    Err(e) => failures.push(format!("{e:?}")),
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            (answered, failures)
+        });
+        RunningProxy::replace_binary(&i);
+        let moved = p.wait_for(|h| h.is_some_and(|h| h != before));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(moved, "the proxy restarted on the new binary");
+        tool.join().unwrap()
+    });
+    assert!(answered > 50, "the tool kept sending ({answered} answered)");
+    assert!(failures.is_empty(), "{} of {} requests failed during the restart: {:?}", failures.len(), answered + failures.len(), &failures[..failures.len().min(3)]);
+}
+
+#[test]
+fn a_running_proxy_moves_to_the_new_binary_in_the_same_process() {
+    let i = install(&keypair());
+    let mut p = RunningProxy::start(&i);
+    let before = p.health().unwrap();
+
+    RunningProxy::replace_binary(&i);
+
+    let moved = p.wait_for(|h| h.is_some_and(|h| h != before));
+    let still_running = p.child.try_wait().unwrap().is_none();
+    assert!(moved, "the proxy restarted on the new binary (alive: {still_running}, health now: {:?}, before: {before})", p.health());
     assert!(still_running, "and kept its process, so a login service never sees it exit");
 }

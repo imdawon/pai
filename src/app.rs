@@ -127,6 +127,10 @@ impl Env {
             let Some(key) = old.get(DEVICE_KEY)? else { continue };
             self.keystore.set(DEVICE_KEY, &key)?;
             for name in [CREDENTIAL, NEXT_CREDENTIAL, PROXY_KEY] {
+                // A local key already here is the one a running proxy holds.
+                if name == PROXY_KEY && matches!(self.keystore.get(name), Ok(Some(_))) {
+                    continue;
+                }
                 if let Ok(Some(value)) = old.get(name) {
                     let _ = self.keystore.set(name, &value);
                 }
@@ -434,6 +438,15 @@ pub fn local_key(env: &Env) -> Result<String> {
     if let Some(k) = env.keystore.get(PROXY_KEY)? {
         return Ok(k.to_string());
     }
+    // A proxy restarted on an updated pai asks for this key first, while coding tools still hold
+    // the one an older pai kept elsewhere: move the secrets now. If the old store can't be read,
+    // a new key keeps the proxy starting; the device key's own lookup reports the error.
+    if env.keystore.get(DEVICE_KEY)?.is_none() && env.paths.config_file().exists() {
+        let _ = env.adopt_old_secrets();
+        if let Some(k) = env.keystore.get(PROXY_KEY)? {
+            return Ok(k.to_string());
+        }
+    }
     let mut bytes = [0u8; 32];
     rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
     let key = format!("pai-local-{}", b64(bytes));
@@ -494,6 +507,7 @@ fn wait_for_fingerprint(env: &Env, key: &str, want: &str) -> bool {
 pub fn spawn_detached(env: &Env, args: &[&str]) -> std::io::Result<()> {
     let mut cmd = std::process::Command::new(&env.pai_bin);
     cmd.args(args)
+        .env_remove(crate::proxy::LISTENER_FD)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());

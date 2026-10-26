@@ -448,3 +448,25 @@ fn an_update_finds_the_device_key_where_an_older_pai_kept_it() {
     assert!(notes.iter().any(|n| n.contains("Devices in the web app")), "{notes:?}");
     assert!(t.env.config().unwrap().is_none(), "unpair still works without the key");
 }
+
+#[test]
+fn an_updated_proxy_keeps_the_local_key_an_older_pai_made() {
+    use pai::keystore::{Keystore, PROXY_KEY};
+    let relay = FakeRelay::start(CODE);
+    let mut t = paired(&relay);
+    let key = t.env.keystore.get(DEVICE_KEY).unwrap().unwrap();
+
+    let old = Keystore::File(t.dir.path().join("old-secrets.json"));
+    old.set(DEVICE_KEY, &key).unwrap();
+    old.set(PROXY_KEY, "pai-local-old").unwrap();
+    t.env.keystore.delete(DEVICE_KEY).unwrap();
+    t.env.keystore.delete(PROXY_KEY).unwrap();
+    t.env.old_stores = vec![old.clone()];
+
+    // A proxy restarted on the new binary asks for the local key before anything needs the device
+    // key. The coding tool still holds the old local key from its last `pai token`.
+    assert_eq!(app::local_key(&t.env).unwrap(), "pai-local-old");
+    app::credential(&t.env, false).unwrap();
+    assert_eq!(app::local_key(&t.env).unwrap(), "pai-local-old", "the same key once the device key moves too");
+    assert!(old.get(PROXY_KEY).unwrap().is_none(), "and gone from the old store");
+}

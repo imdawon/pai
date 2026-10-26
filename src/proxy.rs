@@ -99,6 +99,67 @@ struct Proxy {
     restart: AtomicBool,
     /// Woken when a response announced a newer release and an update was started.
     update_poke: Notify,
+    /// A second handle on the listening socket, for the updated `pai` to take over.
+    handover: Mutex<Option<Handover>>,
+}
+
+/// The listening socket a proxy hands to the updated `pai` that replaces it, so connections that
+/// arrive during the restart wait in the socket's queue instead of being refused. Unix only:
+/// Windows starts the new proxy as a new process, which binds the port again.
+pub(crate) const LISTENER_FD: &str = "PAI_PROXY_LISTENER_FD";
+
+#[cfg(unix)]
+type Handover = std::os::fd::OwnedFd;
+#[cfg(not(unix))]
+type Handover = ();
+
+/// A copy of the listening socket's handle, closed when this process starts another program.
+#[cfg(unix)]
+fn keep_for_handover(listener: &tokio::net::TcpListener) -> Option<Handover> {
+    use std::os::fd::AsFd;
+    listener.as_fd().try_clone_to_owned().ok()
+}
+
+#[cfg(not(unix))]
+fn keep_for_handover(_: &tokio::net::TcpListener) -> Option<Handover> {
+    None
+}
+
+/// The socket the proxy before this one handed over, if it's what it should be: a TCP socket
+/// listening on 127.0.0.1 at this port. Anything else is left alone.
+#[cfg(unix)]
+fn handed_over(env: &Env, port: u16) -> Option<tokio::net::TcpListener> {
+    use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
+    let fd: RawFd = env.var(LISTENER_FD)?.parse().ok()?;
+    if fd < 3 {
+        return None;
+    }
+    // SAFETY: `fd` was handed to this process to own. If it isn't the socket we expect, it's
+    // released again below without being closed.
+    let std = unsafe { std::net::TcpListener::from_raw_fd(fd) };
+    // A socket at our address with no peer is the listening one, not a connection to it. A
+    // descriptor that isn't a socket fails both.
+    let has_peer = || {
+        // SAFETY: getpeername only reads the descriptor and writes into `addr` and `len`.
+        let mut addr: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+        unsafe { libc::getpeername(fd, (&raw mut addr).cast(), &mut len) == 0 }
+    };
+    let ours = std.local_addr().ok() == Some(std::net::SocketAddr::from(([127, 0, 0, 1], port))) && !has_peer();
+    if !ours {
+        let _ = std.into_raw_fd();
+        return None;
+    }
+    // Programs this proxy starts, such as `pai update`, mustn't hold the port.
+    // SAFETY: sets a flag on a descriptor this process owns.
+    unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    std.set_nonblocking(true).ok()?;
+    tokio::net::TcpListener::from_std(std).ok()
+}
+
+#[cfg(not(unix))]
+fn handed_over(_: &Env, _: u16) -> Option<tokio::net::TcpListener> {
+    None
 }
 
 /// Counts a request as in flight until it's dropped.
@@ -130,11 +191,15 @@ pub fn run(env: Env) -> Result<()> {
     let restart = runtime.block_on(async move {
         let http = upstream_client(&env, &config)?;
         let port = port(&env);
-        let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
-            Ok(l) => l,
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => return Ok(None),
-            Err(e) => return Err(Error::Io(format!("couldn't listen on 127.0.0.1:{port}: {e}"))),
+        let listener = match handed_over(&env, port) {
+            Some(l) => l,
+            None => match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+                Ok(l) => l,
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => return Ok(None),
+                Err(e) => return Err(Error::Io(format!("couldn't listen on 127.0.0.1:{port}: {e}"))),
+            },
         };
+        let handover = keep_for_handover(&listener);
         let proxy = Arc::new(Proxy {
             api: config.api_url.clone(),
             env,
@@ -148,6 +213,7 @@ pub fn run(env: Env) -> Result<()> {
             in_flight: Arc::new(AtomicUsize::new(0)),
             restart: AtomicBool::new(false),
             update_poke: Notify::new(),
+            handover: Mutex::new(handover),
         });
         if proxy.env.prefetch {
             tokio::spawn(prefetch_loop(proxy.env.clone()));
@@ -156,14 +222,22 @@ pub fn run(env: Env) -> Result<()> {
         let app = Router::new().fallback(handle).with_state(proxy.clone());
         let stopping = proxy.clone();
         axum::serve(listener, app)
-            .with_graceful_shutdown(async move { stopping.stop.notified().await })
+            .with_graceful_shutdown(async move {
+                stopping.stop.notified().await;
+                // Told to stop, not restarting: let go of the port at once, so `pai token` can
+                // start another proxy while answers still in flight finish here.
+                if !stopping.restart.load(Ordering::SeqCst) {
+                    stopping.handover.lock().unwrap().take();
+                }
+            })
             .await
             .map_err(|e| Error::Io(format!("the proxy stopped: {e}")))?;
-        Ok::<_, Error>(proxy.restart.load(Ordering::SeqCst).then(|| proxy.env.clone()))
+        let restart = proxy.restart.load(Ordering::SeqCst);
+        Ok::<_, Error>(restart.then(|| (proxy.env.clone(), proxy.handover.lock().unwrap().take())))
     })?;
     drop(runtime);
     match restart {
-        Some(env) => restart_proxy(&env),
+        Some((env, handover)) => restart_proxy(&env, handover),
         None => Ok(()),
     }
 }
@@ -213,16 +287,30 @@ async fn update_loop(p: Arc<Proxy>) {
 }
 
 /// Replaces this proxy with the `pai` now on disk. On Unix it keeps the process ID, so a login
-/// service never sees it exit.
-fn restart_proxy(env: &Env) -> Result<()> {
+/// service never sees it exit, and the listening socket, so no connection is refused meanwhile.
+fn restart_proxy(env: &Env, handover: Option<Handover>) -> Result<()> {
     #[cfg(unix)]
     {
+        use std::os::fd::IntoRawFd;
         use std::os::unix::process::CommandExt;
-        let e = std::process::Command::new(&env.pai_bin).arg("proxy").exec();
+        let mut cmd = std::process::Command::new(&env.pai_bin);
+        cmd.arg("proxy").env_remove(LISTENER_FD);
+        if let Some(fd) = handover {
+            let fd = fd.into_raw_fd();
+            // Kept open across exec only now, so no program started earlier holds the port.
+            // SAFETY: clears a flag on a descriptor this process owns.
+            if unsafe { libc::fcntl(fd, libc::F_SETFD, 0) } == 0 {
+                cmd.env(LISTENER_FD, fd.to_string());
+            }
+        }
+        let e = cmd.exec();
         Err(Error::Io(format!("couldn't start the updated pai: {e}")))
     }
     #[cfg(not(unix))]
-    app::spawn_detached(env, &["proxy"]).map_err(|e| Error::Io(format!("couldn't start the updated pai: {e}")))
+    {
+        let _ = handover;
+        app::spawn_detached(env, &["proxy"]).map_err(|e| Error::Io(format!("couldn't start the updated pai: {e}")))
+    }
 }
 
 /// Once a period (a day, or an hour on the 1-day trial), at a random time, collect the next
@@ -271,8 +359,16 @@ fn same(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-async fn handle(State(p): State<Arc<Proxy>>, req: Request) -> Response {
-    let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("");
+async fn handle(state: State<Arc<Proxy>>, req: Request) -> Response {
+    let mut resp = route(state, req).await;
+    // One request per connection, so a coding tool never sends on a kept-open connection that a
+    // restarting proxy is closing. A new connection to 127.0.0.1 costs next to nothing.
+    resp.headers_mut().insert(header::CONNECTION, HeaderValue::from_static("close"));
+    resp
+}
+
+async fn route(State(p): State<Arc<Proxy>>, req: Request) -> Response {
+    let host =req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("");
     if host != format!("127.0.0.1:{}", p.port) && host != format!("localhost:{}", p.port) {
         // A web page that rebinds its own name to 127.0.0.1 arrives with its own host name.
         return error(StatusCode::FORBIDDEN, "permission_error", format!("pai's proxy only answers at 127.0.0.1:{}.", p.port));
