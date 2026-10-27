@@ -784,12 +784,12 @@ impl std::fmt::Display for Status {
             match (self.hourly, self.credential_today, self.credential_tomorrow) {
                 (false, true, true) => "yes, for today and tomorrow",
                 (false, true, false) => "yes, for today",
-                (false, false, true) => "none for today; tomorrow's is ready",
-                (false, false, false) => "none for today",
+                (false, false, true) => "none for today; tomorrow's is ready (`pai token` collects today's)",
+                (false, false, false) => "none for today (`pai token` collects it)",
                 (true, true, true) => "yes, for this hour and the next (1-day trial)",
                 (true, true, false) => "yes, for this hour (1-day trial)",
-                (true, false, true) => "none for this hour; the next hour's is ready (1-day trial)",
-                (true, false, false) => "none for this hour (1-day trial)",
+                (true, false, true) => "none for this hour; the next hour's is ready (1-day trial; `pai token` collects this hour's)",
+                (true, false, false) => "none for this hour (1-day trial; `pai token` collects it)",
             }
         )?;
         writeln!(f, "Relay:      {}", c.relay_url)?;

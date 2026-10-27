@@ -634,7 +634,7 @@ fn opencode_apply(env: &Env, t: &Target) -> Result<String> {
     let json_path = dir.join("opencode.json");
     if !json_path.exists() && dir.join("opencode.jsonc").exists() {
         log.push_str(&format!(
-            "Left {} alone (pai doesn't rewrite JSONC). Add \"model\": \"{PROVIDER_ID}/{MODEL}\" to it, or pick the model with /models.\n",
+            "Left {} alone: pai doesn't rewrite JSONC files, so their comments stay. To finish, add \"model\": \"{PROVIDER_ID}/{MODEL}\" at the top level of that file, or choose the model with /models in OpenCode.\n",
             dir.join("opencode.jsonc").display()
         ));
     } else {
