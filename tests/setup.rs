@@ -164,6 +164,30 @@ fn opencode_writes_plugin_and_model() {
 }
 
 #[test]
+fn opencode_sets_the_model_in_jsonc_and_keeps_comments() {
+    let t = TestEnv::new();
+    let dir = t.home().join(".config").join("opencode");
+    fs::create_dir_all(&dir).unwrap();
+    let before = "{\n  // my theme\n  \"theme\": \"tokyonight\",\n}\n";
+    fs::write(dir.join("opencode.jsonc"), before).unwrap();
+
+    let log = setup::run(&t.env, Tool::Opencode, &target(&t, 65536), true).unwrap();
+
+    let after = fs::read_to_string(dir.join("opencode.jsonc")).unwrap();
+    assert_eq!(after, "{\n  \"model\": \"dawonai/qwen3.8-27b\",\n  // my theme\n  \"theme\": \"tokyonight\",\n}\n");
+    assert!(!dir.join("opencode.json").exists(), "no second config file");
+    assert!(!log.contains("Left"), "{log}");
+    assert_eq!(backups(&dir).len(), 1);
+    assert_eq!(setup::set_up_tools(&t.env), vec![Tool::Opencode]);
+
+    // Running it again changes nothing, and undo puts the file back.
+    setup::run(&t.env, Tool::Opencode, &target(&t, 65536), true).unwrap();
+    assert_eq!(backups(&dir).len(), 1);
+    setup::undo(&t.env, Tool::Opencode).unwrap();
+    assert_eq!(fs::read_to_string(dir.join("opencode.jsonc")).unwrap(), before);
+}
+
+#[test]
 fn omp_writes_extension() {
     let t = TestEnv::new();
     setup::run(&t.env, Tool::Omp, &target(&t, 262144), true).unwrap();

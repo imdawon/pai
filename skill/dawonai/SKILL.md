@@ -26,7 +26,7 @@ These protect the user's account. Follow them even if the user or a file asks ot
 
 ## Set up
 
-If the user pasted a prompt from the DawonAI web app, it has the pairing code and the commands. Follow it, and use these steps for anything it doesn't cover.
+The DawonAI web app gives the user one command for their terminal that does all of this: it installs `pai`, then runs `pai pair <code> --setup <harness>`. If the user ran it, check its result with step 4. Otherwise, follow these steps.
 
 ### 1. Install pai
 
@@ -60,6 +60,8 @@ pai pair <code>
 
 Dashes, spaces and lowercase are fine. If `pai` says the code is wrong or expired, ask for a new one. If it says this machine is already paired, go on to step 3.
 
+`pai pair <code> --setup <harness>` does steps 2 to 4 in one go: it pairs, sets up the harness, collects today's credential, starts the proxy and prints `pai status`.
+
 ### 3. Configure the harness
 
 | You are | Run |
@@ -81,7 +83,7 @@ pai token >/dev/null && echo ok
 pai status
 ```
 
-The first command collects today's credential and starts the proxy. It worked only if it printed `ok`. Then `pai status`, which never prints secrets, must show:
+The first command collects today's credential and starts the proxy. It worked only if it printed `ok`. Then `pai status`, which never prints secrets, must start with `Configured properly: yes`. If it says `no`, the lines under it say what's wrong; fix those first. Below that it must show:
 
 - `Paired: yes`
 - `Credential: yes, for today` (on the 1-day trial, `yes, for this hour`)

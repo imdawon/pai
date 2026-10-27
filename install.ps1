@@ -1,7 +1,15 @@
 # Installs pai on Windows: downloads the release binary for this CPU, checks the Ed25519 signature
 # on SHA256SUMS with the pai release key below, checks the binary against SHA256SUMS, and puts it
 # in %LOCALAPPDATA%\pai (or $env:PAI_INSTALL_DIR).
+#
+#   install.ps1                                  install only
+#   install.ps1 pair <code> --setup <harness>    then run `pai pair <code> --setup <harness>`:
+#                                                the one command the DawonAI web app shows
 $ErrorActionPreference = 'Stop'
+$paiArgs = @($args)
+if ($paiArgs.Count -gt 0 -and $paiArgs[0] -ne 'pair') {
+    throw "pai install: the only command this installer runs after installing is ``pai pair``, not ``$($paiArgs[0])``"
+}
 $ProgressPreference = 'SilentlyContinue'
 
 # The pai release key (release/signing-key.pub), written here by release/embed-key.sh. The same
@@ -140,4 +148,10 @@ try {
 }
 finally {
     Remove-Item -Recurse -Force -Path $tmp -ErrorAction SilentlyContinue
+}
+
+if ($paiArgs.Count -gt 0) {
+    Write-Host ''
+    & (Join-Path $dir 'pai.exe') @paiArgs
+    exit $LASTEXITCODE
 }

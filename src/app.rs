@@ -707,7 +707,13 @@ pub struct Status {
     pub keystore: String,
     /// The relay no longer knows this device: it went 30 days unused, or was removed in Account.
     pub device_removed: bool,
+    /// The harnesses `pai setup` has set up.
+    pub harnesses: Vec<crate::setup::Tool>,
+    /// What stops pai working, each with what to do; empty when it's configured properly.
+    pub problems: Vec<String>,
 }
+
+const SETUP_HINT: &str = "Run the command from Account > Set up a coding tool in the DawonAI web app, or `pai pair <code> --setup <claude-code|codex|opencode|omp|hermes>`";
 
 pub fn status(env: &Env) -> Result<Status> {
     let config = env.config()?;
@@ -724,6 +730,8 @@ pub fn status(env: &Env) -> Result<Status> {
             trust: trust(env, None),
             keystore,
             device_removed: false,
+            harnesses: crate::setup::set_up_tools(env),
+            problems: vec![format!("This computer isn't paired. {SETUP_HINT}.")],
         });
     };
     let credential_today = cached_credential(env).ok().flatten().is_some()
@@ -731,17 +739,22 @@ pub fn status(env: &Env) -> Result<Status> {
     let credential_tomorrow = stored_credential(env, NEXT_CREDENTIAL, 1).ok().flatten().is_some();
     let hourly = held_plan(env).is_some_and(|p| Period::of(p) == Period::Hour);
     let mut device_removed = false;
+    // Whether the plan is paid: None when it couldn't be checked.
+    let mut paid = None;
     let plan = match env.device_key() {
         Err(e) => format!("unknown ({e})"),
         Ok(key) => match env
             .relay(&cfg, env.relay_timeout.min(Duration::from_secs(10)))
             .and_then(|r| r.account(&key, &cfg.device_id))
         {
-            Ok(a) => match (&a.plan, a.credential_plan) {
-                (Some(p), Some(_)) => format!("{} ({})", plan_label(p), a.status),
-                (Some(p), None) => format!("{} ({}, not paid)", plan_label(p), a.status),
-                (None, _) => format!("none ({})", a.status),
-            },
+            Ok(a) => {
+                paid = Some(a.plan.is_some() && a.credential_plan.is_some());
+                match (&a.plan, a.credential_plan) {
+                    (Some(p), Some(_)) => format!("{} ({})", plan_label(p), a.status),
+                    (Some(p), None) => format!("{} ({}, not paid)", plan_label(p), a.status),
+                    (None, _) => format!("none ({})", a.status),
+                }
+            }
             Err(Error::DeviceRemoved) => {
                 device_removed = true;
                 open_web_app(env, &cfg);
@@ -751,6 +764,24 @@ pub fn status(env: &Env) -> Result<Status> {
             Err(e) => format!("unknown ({e})"),
         },
     };
+    let trust = trust(env, Some(&cfg));
+    let harnesses = crate::setup::set_up_tools(env);
+    let mut problems = Vec::new();
+    if device_removed {
+        problems.push("This device was removed from the account. Run `pai unpair`, then pair again.".to_string());
+    } else {
+        match paid {
+            Some(true) => {}
+            Some(false) => problems.push("The account's plan isn't paid. Choose a plan in the DawonAI web app.".to_string()),
+            None => problems.push(format!("pai couldn't check the plan: {plan}.")),
+        }
+    }
+    if trust.test_ca.is_none() && cfg.api_url.starts_with("https://") && trust.api_pins.is_empty() {
+        problems.push("This pai has no pins for the model API, so its proxy won't connect. Install pai again.".to_string());
+    }
+    if harnesses.is_empty() {
+        problems.push("No harness is set up. Run `pai setup <claude-code|codex|opencode|omp|hermes> --apply`.".to_string());
+    }
     Ok(Status {
         config,
         plan,
@@ -762,16 +793,47 @@ pub fn status(env: &Env) -> Result<Status> {
             None => format!("not running (coding tools start it with `pai token`); {}", crate::proxy::url(env)),
         },
         service: crate::service::describe(env),
-        trust: trust(env, Some(&cfg)),
+        trust,
         keystore,
         device_removed,
+        harnesses,
+        problems,
     })
 }
 
-impl std::fmt::Display for Status {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Status {
+    /// The status with its first line in green or red, for a terminal.
+    pub fn render(&self, color: bool) -> String {
+        let (on, off) = match (color, self.problems.is_empty()) {
+            (false, _) => ("", ""),
+            (true, true) => ("\x1b[1;32m", "\x1b[0m"),
+            (true, false) => ("\x1b[1;31m", "\x1b[0m"),
+        };
+        let mut out = format!("{on}Configured properly: {}{off}\n", if self.problems.is_empty() { "yes" } else { "no" });
+        for p in &self.problems {
+            out.push_str(&format!("  - {p}\n"));
+        }
+        out.push('\n');
+        out.push_str(&self.details());
+        out
+    }
+
+    fn details(&self) -> String {
+        let mut f = String::new();
+        let harnesses = if self.harnesses.is_empty() {
+            "none".to_string()
+        } else {
+            self.harnesses.iter().map(|t| t.display_name()).collect::<Vec<_>>().join(", ")
+        };
+        let _ = self.write_details(&mut f, &harnesses);
+        f
+    }
+
+    fn write_details(&self, f: &mut String, harnesses: &str) -> std::fmt::Result {
+        use std::fmt::Write;
         let Some(c) = &self.config else {
             writeln!(f, "Paired:     no")?;
+            writeln!(f, "Harnesses:  {harnesses}")?;
             return writeln!(f, "Keystore:   {}", self.keystore);
         };
         writeln!(f, "Paired:     yes")?;
@@ -804,6 +866,7 @@ impl std::fmt::Display for Status {
             writeln!(f, "Pins:       {} for the API's key", self.trust.api_pins.len())?;
         }
         writeln!(f, "Proxy:      {}", self.proxy)?;
+        writeln!(f, "Harnesses:  {harnesses}")?;
         writeln!(f, "Service:    {}", self.service)?;
         writeln!(f, "Keystore:   {}", self.keystore)?;
         if self.device_removed {
@@ -812,6 +875,12 @@ impl std::fmt::Display for Status {
             writeln!(f, "DawonAI web app: {}/", c.app_url())?;
         }
         Ok(())
+    }
+}
+
+impl std::fmt::Display for Status {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.render(false))
     }
 }
 

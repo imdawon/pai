@@ -4,6 +4,7 @@
 pub mod app;
 pub mod config;
 pub mod error;
+pub mod jsonc;
 pub mod keystore;
 pub mod pin;
 pub mod proxy;

@@ -73,6 +73,15 @@ fn pair_token_cached_token_unpair() {
         "{shown}"
     );
     assert!(!shown.contains(&first));
+    // Paired and paid, but no harness yet.
+    assert!(shown.starts_with("Configured properly: no\n  - No harness is set up."), "{shown}");
+    let target = pai::setup::Target::resolve(&t.env, app::plan_hint(&t.env));
+    pai::setup::run(&t.env, pai::setup::Tool::Omp, &target, true).unwrap();
+    let status = app::status(&t.env).unwrap();
+    assert!(status.problems.is_empty(), "{:?}", status.problems);
+    let shown = status.to_string();
+    assert!(shown.starts_with("Configured properly: yes\n\n") && shown.contains("Harnesses:  OMP"), "{shown}");
+    assert!(status.render(true).starts_with("\x1b[1;32mConfigured properly: yes\x1b[0m"));
 
     let notes = app::unpair(&t.env).unwrap();
     assert!(notes[0].contains("Removed this device"), "{notes:?}");

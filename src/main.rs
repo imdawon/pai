@@ -39,6 +39,11 @@ enum Command {
         /// Name shown in the web app's device list [default: pai on <hostname>]
         #[arg(long)]
         name: Option<String>,
+        /// Then set up this harness (as `pai setup <harness> --apply`), collect today's credential,
+        /// start the proxy and show `pai status`. On a computer that's already paired, sets up the
+        /// harness with that pairing.
+        #[arg(long, value_enum, value_name = "HARNESS")]
+        setup: Option<Tool>,
         // Test mode, in staging builds only (docs/TESTING.md). Hidden from --help on purpose.
         #[cfg(feature = "test-mode")]
         #[arg(long = "test-ca", hide = true, requires = "test_pins")]
@@ -123,6 +128,7 @@ fn run(command: Command) -> Result<(), Error> {
             api,
             app,
             name,
+            setup: harness,
             #[cfg(feature = "test-mode")]
             test_ca,
             #[cfg(feature = "test-mode")]
@@ -132,23 +138,34 @@ fn run(command: Command) -> Result<(), Error> {
             let test = test_ca.as_deref().map(|ca| (ca, test_pins.as_slice()));
             #[cfg(not(feature = "test-mode"))]
             let test = None;
-            let cfg = app::pair(
-                &env,
-                &code,
-                relay.as_deref(),
-                api.as_deref(),
-                app.as_deref(),
-                name.as_deref(),
-                test,
-            )?;
-            println!(
-                "Paired. Account {}, device {}.",
-                cfg.account_id, cfg.device_id
-            );
-            if let Some(warning) = app::test_mode_warning(&app::trust(&env, Some(&cfg))) {
-                eprintln!("{warning}");
+            match app::pair(&env, &code, relay.as_deref(), api.as_deref(), app.as_deref(), name.as_deref(), test) {
+                Ok(cfg) => {
+                    println!("Paired. Account {}, device {}.", cfg.account_id, cfg.device_id);
+                    if let Some(warning) = app::test_mode_warning(&app::trust(&env, Some(&cfg))) {
+                        eprintln!("{warning}");
+                    }
+                }
+                Err(Error::AlreadyPaired) if harness.is_some() => {
+                    let account = env.config().ok().flatten().map(|c| c.account_id).unwrap_or_default();
+                    println!(
+                        "This computer is already paired with account {account}, so the new code stays unused. \
+                         To pair it with another account, run `pai unpair` first."
+                    );
+                }
+                Err(e) => return Err(e),
             }
-            println!("Next: `pai setup <claude-code|codex|opencode|omp|hermes> --apply`, or `pai setup other` for any other harness.");
+            let Some(tool) = harness else {
+                println!("Next: `pai setup <claude-code|codex|opencode|omp|hermes> --apply`, or `pai setup other` for any other harness.");
+                return Ok(());
+            };
+            println!();
+            let target = setup::Target::resolve(&env, app::plan_hint(&env));
+            print!("{}", setup::run(&env, tool, &target, true)?);
+            // Collects today's credential and starts the proxy now, so a problem shows here rather
+            // than in the harness. The key isn't printed.
+            app::token(&env)?;
+            println!("Collected today's credential and started pai's proxy.\n");
+            print_status(&env)?;
         }
         Command::Token => {
             let key = app::token(&env)?;
@@ -192,7 +209,7 @@ fn run(command: Command) -> Result<(), Error> {
             }
         }
         Command::Proxy => pai::proxy::run(env)?,
-        Command::Status => print!("{}", app::status(&env)?),
+        Command::Status => print_status(&env)?,
 
         Command::Unpair => {
             for line in app::unpair(&env)? {
@@ -210,5 +227,16 @@ fn run(command: Command) -> Result<(), Error> {
             print!("{}", setup::run(&env, tool, &target, apply)?);
         }
     }
+    Ok(())
+}
+
+/// `pai status`, with its first line in color on a terminal that shows it.
+fn print_status(env: &Env) -> Result<(), Error> {
+    use std::io::IsTerminal;
+    let color = std::io::stdout().is_terminal()
+        && std::env::var_os("NO_COLOR").is_none()
+        // The old Windows console prints escape codes as text; Windows Terminal sets WT_SESSION.
+        && (cfg!(not(windows)) || std::env::var_os("WT_SESSION").is_some());
+    print!("{}", app::status(env)?.render(color));
     Ok(())
 }

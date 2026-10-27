@@ -2,7 +2,16 @@
 # Installs pai on macOS or Linux: downloads the release binary for this OS and CPU, checks the
 # Ed25519 signature on SHA256SUMS with the pai release key below, checks the binary against
 # SHA256SUMS, and puts it in ~/.local/bin (or $PAI_INSTALL_DIR).
+#
+#   sh install.sh                                  install only
+#   sh install.sh pair <code> --setup <harness>    then run `pai pair <code> --setup <harness>`:
+#                                                  the one command the DawonAI web app shows
 set -eu
+
+case "${1:-}" in
+"" | pair) ;;
+*) echo "pai install: the only command this installer runs after installing is \`pai pair\`, not \`$1\`" >&2; exit 1 ;;
+esac
 
 # The pai release key (release/signing-key.pub), written here by release/embed-key.sh. The same
 # key is in pai's README on GitHub and on https://privacyai.example/pai/.
@@ -143,3 +152,8 @@ case ":$PATH:" in
 	fi
 	;;
 esac
+
+if [ "${1:-}" = pair ]; then
+	echo
+	exec "$BIN_DIR/pai" "$@"
+fi

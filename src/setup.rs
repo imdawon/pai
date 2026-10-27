@@ -248,7 +248,7 @@ fn applied_files(env: &Env, tool: Tool) -> (Vec<PathBuf>, Vec<PathBuf>) {
             vec![codex_dir(env).join(format!("{PROVIDER_ID}.config.toml"))],
         ),
         Tool::Opencode => (
-            vec![opencode_dir(env).join("opencode.json")],
+            vec![opencode_config_path(env)],
             vec![opencode_dir(env).join("plugins").join("dawonai.ts")],
         ),
         Tool::Omp => (vec![], vec![omp_extension_path(env)]),
@@ -269,6 +269,11 @@ fn has_pai_settings(env: &Env, text: &str) -> bool {
 fn is_set_up(env: &Env, tool: Tool) -> bool {
     let (changed, added) = applied_files(env, tool);
     changed.iter().any(|p| fs::read_to_string(p).is_ok_and(|t| has_pai_settings(env, &t))) || added.iter().any(|p| p.exists())
+}
+
+/// The harnesses `pai setup <tool> --apply` has set up and that are still set up.
+pub fn set_up_tools(env: &Env) -> Vec<Tool> {
+    TOOLS.into_iter().filter(|t| is_set_up(env, *t)).collect()
 }
 
 /// After an update: writes each tool's config again, as this version of pai would, for the tools
@@ -605,6 +610,13 @@ fn opencode_dir(env: &Env) -> PathBuf {
     }
 }
 
+/// OpenCode's global config: `opencode.json`, or `opencode.jsonc` when only that exists.
+fn opencode_config_path(env: &Env) -> PathBuf {
+    let dir = opencode_dir(env);
+    let jsonc = dir.join("opencode.jsonc");
+    if !dir.join("opencode.json").exists() && jsonc.exists() { jsonc } else { dir.join("opencode.json") }
+}
+
 fn opencode_print(env: &Env, t: &Target) -> String {
     let dir = opencode_dir(env);
     format!(
@@ -614,7 +626,7 @@ fn opencode_print(env: &Env, t: &Target) -> String {
         dir.join("plugins").join("dawonai.ts").display(),
         t.pai_bin,
         t.base_url,
-        dir.join("opencode.json").display(),
+        opencode_config_path(env).display(),
         pretty(&json!({ "model": format!("{PROVIDER_ID}/{MODEL}") })),
         skill_print(env, Tool::Opencode),
     )
@@ -631,12 +643,18 @@ fn opencode_apply(env: &Env, t: &Target) -> Result<String> {
         &mut log,
     )?;
 
-    let json_path = dir.join("opencode.json");
-    if !json_path.exists() && dir.join("opencode.jsonc").exists() {
-        log.push_str(&format!(
-            "Left {} alone: pai doesn't rewrite JSONC files, so their comments stay. To finish, add \"model\": \"{PROVIDER_ID}/{MODEL}\" at the top level of that file, or choose the model with /models in OpenCode.\n",
-            dir.join("opencode.jsonc").display()
-        ));
+    let json_path = opencode_config_path(env);
+    if json_path.extension().is_some_and(|e| e == "jsonc") {
+        // Comments stay: only the model's value changes, or a model line is added.
+        let text = fs::read_to_string(&json_path).map_err(|e| io_err("read", &json_path, e))?;
+        let model = serde_json::to_string(&format!("{PROVIDER_ID}/{MODEL}")).expect("a string serializes");
+        match crate::jsonc::set_top_level(&text, "model", &model) {
+            Some(new) => write_file(&json_path, &new, now, &mut log)?,
+            None => log.push_str(&format!(
+                "Left {} alone: pai couldn't read it as a JSONC object. To finish, add \"model\": \"{PROVIDER_ID}/{MODEL}\" at its top level, or choose the model with /models in OpenCode.\n",
+                json_path.display()
+            )),
+        }
     } else {
         let mut cfg = read_json_object(&json_path)?;
         if cfg.is_empty() {
