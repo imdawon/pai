@@ -5,7 +5,7 @@ An [OpenCode](https://opencode.ai) plugin for DawonAI. It adds a `dawonai` provi
 ## Requirements
 
 - The `pai` CLI, paired with this device (`pai token` must print a credential).
-- OpenCode 1.18 or later.
+- OpenCode 1.18 or later, or OpenCode 2.0.4 or later.
 
 ## Enable it
 

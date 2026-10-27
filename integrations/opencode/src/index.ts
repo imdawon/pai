@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process"
 import type { Plugin, PluginModule } from "@opencode-ai/plugin"
+import type { Plugin as PluginV2 } from "@opencode/plugin"
 
 export const PROVIDER_ID = "dawonai"
 export const MODEL_ID = "qwen3.8-27b"
@@ -140,9 +141,58 @@ export const DawonAIPlugin: Plugin = async () => {
   }
 }
 
-const plugin: PluginModule = {
+// OpenCode 2 (2.0.4 and later) loads `setup` and ignores `server`; OpenCode 1 loads `server` and ignores `setup`.
+export const DawonAISetup: PluginV2.Plugin["setup"] = async (ctx) => {
+  // OpenCode 1's experimental core also calls `setup`, with no provider or session domain. `server` covers OpenCode 1.
+  if (typeof ctx.provider?.transform !== "function" || typeof ctx.session?.hook !== "function") return
+
+  const credentials = createCredentialSource()
+  let sent: string | undefined
+
+  await ctx.provider.transform((providers) => {
+    providers.update(PROVIDER_ID, (provider) => {
+      // A provider OpenCode hasn't seen starts as { name: id, activation: "auto", package: "" }.
+      if (!provider.name || provider.name === PROVIDER_ID) provider.name = "DawonAI"
+      if (provider.activation !== "disabled") provider.activation = "enabled"
+      // OpenCode 2's bundled OpenAI-compatible client; it rewrites "@ai-sdk/openai-compatible" to this one anyway.
+      provider.package ||= "@opencode/ai/providers/openai-compatible"
+      const baseURL = typeof provider.settings?.baseURL === "string" ? provider.settings.baseURL : defaultBaseURL()
+      provider.settings = { ...provider.settings, baseURL, provider: PROVIDER_ID }
+    })
+    providers.models.update(PROVIDER_ID, MODEL_ID, (model) => {
+      if (!model.name || model.name === MODEL_ID) model.name = "Qwen 3.8 27B"
+      model.capabilities = { ...model.capabilities, tools: true, input: ["text"], output: ["text"] }
+      model.limit = { ...model.limit, context: CONTEXT_WINDOW, output: Math.min(32768, CONTEXT_WINDOW / 4) }
+    })
+  })
+
+  // OpenCode 2 talks to the model without the AI SDK, so there is no fetch to wrap. The key goes on each request instead.
+  await ctx.session.hook(
+    "model.request",
+    async (event) => {
+      sent = await credentials.get()
+      event.headers.authorization = `Bearer ${sent}`
+    },
+    { providerID: PROVIDER_ID },
+  )
+  // After a 401, or when pai's proxy can't be reached, the next attempt runs `pai token` again; it starts the proxy.
+  await ctx.session.hook(
+    "retry",
+    (event) => {
+      const unauthorized = event.error.status === 401
+      if (!unauthorized && event.error.type !== "provider.transport") return
+      if (sent) credentials.invalidate(sent)
+      // OpenCode doesn't retry a 401 by itself. Attempt 2 is the first retry.
+      if (unauthorized && event.attempt === 2) event.decision = { retry: true, delay: 0 }
+    },
+    { providerID: PROVIDER_ID },
+  )
+}
+
+const plugin: PluginModule & PluginV2.Plugin = {
   id: PROVIDER_ID,
   server: DawonAIPlugin,
+  setup: DawonAISetup,
 }
 
 export default plugin
