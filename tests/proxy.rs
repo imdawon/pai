@@ -33,6 +33,8 @@ struct Seen {
     refuse_streams: usize,
     /// The stream limit to name in `pai-streams` on every response.
     streams_header: Option<String>,
+    /// How many requests to fail with `503` first.
+    fail_first: usize,
 }
 
 /// A fake model API over TLS with a self-signed certificate for `localhost`. It records each
@@ -73,6 +75,9 @@ fn fake_gateway(seen: Arc<Mutex<Seen>>) -> (u16, String, String) {
                                 s.requests.push((path, auth, req.headers().contains_key("x-api-key")));
                                 let (status, body) = if s.reject_first && s.requests.len() == 1 {
                                     (401, r#"{"error":{"type":"invalid_credential","message":"stale"}}"#)
+                                } else if s.fail_first > 0 {
+                                    s.fail_first -= 1;
+                                    (503, r#"{"error":{"type":"server_error","message":"down"}}"#)
                                 } else if stream && s.refuse_streams > 0 {
                                     s.refuse_streams -= 1;
                                     (429, r#"{"type":"error","error":{"type":"stream_limit","message":"busy"}}"#)
@@ -159,6 +164,7 @@ fn start(api_port: u16, ca_pem: &str, pin: &str) -> (Running, FakeRelay) {
     app::pair(&t.env, CODE, Some(&relay.url), Some(&api), None, None, Some((ca.as_path(), &pins[..]))).unwrap();
     let port = free_port();
     t.env.vars.insert("PAI_PROXY_PORT".into(), port.to_string());
+    t.env.vars.insert("PAI_TEST_RETRY_MS".into(), "1".into());
     let key = app::local_key(&t.env).unwrap();
     let env = t.env.clone();
     std::thread::spawn(move || pai::proxy::run(env));
@@ -334,6 +340,18 @@ fn sends_again_when_the_api_refuses_for_its_stream_limit() {
     assert_eq!(status, 429);
     assert_eq!(body["error"]["type"], "stream_limit");
     assert_eq!(seen.lock().unwrap().requests.len(), 3 + 6);
+}
+
+#[test]
+fn sends_again_after_an_error_before_the_answer() {
+    let seen = Arc::new(Mutex::new(Seen { fail_first: 2, ..Seen::default() }));
+    let (api_port, ca, pin) = fake_gateway(seen.clone());
+    let (p, _relay) = start(api_port, &ca, &pin);
+    assert_eq!(p.post("/v1/messages", Some(&p.key), &[]).0, 200, "two 503s, then answered");
+    assert_eq!(seen.lock().unwrap().requests.len(), 3);
+    // A token count (no stream) is sent again too.
+    seen.lock().unwrap().fail_first = 1;
+    assert_eq!(p.post("/v1/messages/count_tokens", Some(&p.key), &[]).0, 200);
 }
 
 #[test]

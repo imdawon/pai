@@ -24,12 +24,15 @@ use crate::pin;
 
 pub const DEFAULT_PORT: u16 = 47821;
 const MAX_BODY: usize = 32 * 1024 * 1024;
-/// How long a request waits for one of the plan's streams before it gets the 429 the model API
-/// would have given.
+/// How long a request waits for one of the plan's streams before it steps out of line and rejoins
+/// at the back after a random pause of up to `REJOIN_JITTER`, rather than failing.
 const STREAM_WAIT: Duration = Duration::from_secs(600);
-/// How many times a request the model API refused for its stream limit is sent again. The API
-/// can free a stream a moment after pai has.
-const STREAM_RETRIES: u32 = 5;
+const REJOIN_JITTER: Duration = Duration::from_secs(30);
+/// How many times a request is sent again after an error that came before any of the answer: no
+/// connection, a 429 (the API frees a stream a moment after pai does, or it's busy), or a 500,
+/// 502, 503 or 504. Pauses start at 1 s and double, up to 30 s, each with up to half again added
+/// at random so many devices don't retry in step.
+const RETRIES: u32 = 5;
 
 pub fn port(env: &Env) -> u16 {
     env.var("PAI_PROXY_PORT").and_then(|p| p.parse().ok()).unwrap_or(DEFAULT_PORT)
@@ -456,20 +459,28 @@ impl Proxy {
                 _ => s.insert((max, Arc::new(Semaphore::new(max)))).1.clone(),
             }
         };
-        match tokio::time::timeout(STREAM_WAIT, streams.acquire_owned()).await {
-            Ok(Ok(slot)) => Ok(slot),
-            _ => {
-                let noun = if max == 1 { "request" } else { "requests" };
-                let mut r = error(
-                    StatusCode::TOO_MANY_REQUESTS,
-                    "stream_limit",
-                    format!("Your plan allows {max} {noun} at a time, and that many have been running for 10 minutes. Try again when one finishes."),
-                );
-                r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("2"));
-                Err(r)
+        loop {
+            match tokio::time::timeout(STREAM_WAIT, streams.clone().acquire_owned()).await {
+                Ok(Ok(slot)) => return Ok(slot),
+                Ok(Err(_)) => return Err(error(StatusCode::SERVICE_UNAVAILABLE, "stream_limit", "pai's queue closed. Try again.")),
+                // Ten minutes in line: step out and rejoin after a random pause, so a request stuck
+                // behind a stalled one gets a fresh place rather than an error.
+                Err(_) => tokio::time::sleep(jitter(REJOIN_JITTER)).await,
             }
         }
     }
+}
+
+/// A random wait from zero to `max`.
+fn jitter(max: Duration) -> Duration {
+    max.mul_f64(rand::random::<f64>())
+}
+
+/// The pause before retry `attempt` (0 for the first): `first` (1 s) doubling to 30 times it, plus
+/// up to half again.
+fn backoff(attempt: u32, first: Duration) -> Duration {
+    let base = (first * (1u32 << attempt.min(5))).min(first * 30);
+    base + jitter(base / 2)
 }
 
 /// The requests that hold one of the plan's streams on the model API until their answer ends.
@@ -570,8 +581,10 @@ async fn forward(p: Arc<Proxy>, req: Request) -> Response {
     let path = parts.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
     let url = format!("{}{path}", p.api);
 
-    // A refused credential is replaced once; a stream-limit refusal is sent again a few times.
-    let (mut refresh, mut refreshed, mut refusals) = (false, false, 0);
+    // A refused credential is replaced once; an error before any of the answer is sent again a
+    // few times.
+    let (mut refresh, mut refreshed, mut attempts) = (false, false, 0u32);
+    let first = p.env.var("PAI_TEST_RETRY_MS").and_then(|v| v.parse().ok()).map_or(Duration::from_secs(1), Duration::from_millis);
     loop {
         let credential = match p.credential(std::mem::take(&mut refresh)).await {
             Ok(c) => c,
@@ -587,14 +600,19 @@ async fn forward(p: Arc<Proxy>, req: Request) -> Response {
             .await;
         let resp = match sent {
             Ok(r) => r,
+            Err(_) if attempts < RETRIES => {
+                tokio::time::sleep(backoff(attempts, first)).await;
+                attempts += 1;
+                continue;
+            }
             Err(e) => return unreachable(&p.api, &e),
         };
         note_announced_release(&p, resp.headers());
         note_stream_limit(&p, resp.headers(), &credential);
         let status = resp.status();
         let resp_headers = resp.headers().clone();
-        let may_retry = (status == StatusCode::UNAUTHORIZED && !refreshed)
-            || (status == StatusCode::TOO_MANY_REQUESTS && slot.is_some() && refusals < STREAM_RETRIES);
+        let transient = matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504);
+        let may_retry = (status == StatusCode::UNAUTHORIZED && !refreshed) || (transient && attempts < RETRIES);
         if !may_retry {
             let stream = resp.bytes_stream().map_err(std::io::Error::other);
             return hold(respond(status, &resp_headers, Body::from_stream(stream)), slot);
@@ -605,12 +623,15 @@ async fn forward(p: Arc<Proxy>, req: Request) -> Response {
             (refresh, refreshed) = (true, true);
             continue;
         }
-        if status == StatusCode::TOO_MANY_REQUESTS && kind.contains("stream_limit") {
-            refusals += 1;
-            tokio::time::sleep(retry_after(&resp_headers)).await;
-            continue;
+        if status == StatusCode::UNAUTHORIZED {
+            return hold(respond(status, &resp_headers, Body::from(text)), slot);
         }
-        return hold(respond(status, &resp_headers, Body::from(text)), slot);
+        // A refusal the safety check gave on purpose won't change: pass it on.
+        if kind.contains("safety_unavailable") && status == StatusCode::SERVICE_UNAVAILABLE && attempts > 0 {
+            return hold(respond(status, &resp_headers, Body::from(text)), slot);
+        }
+        tokio::time::sleep(retry_after(&resp_headers).max(backoff(attempts, first))).await;
+        attempts += 1;
     }
 }
 
