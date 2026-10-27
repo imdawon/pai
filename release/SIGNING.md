@@ -41,7 +41,15 @@ openssl pkey -in pai-release.key -pubout -out signing-key.pub
 
 The first command asks for a passphrase, which encrypts the key file. Keep the passphrase in a password manager.
 
-Keep `pai-release.key` on encrypted removable storage, with a second copy in a different place. It never goes on a server, in a repository, in CI, or on the build Mac's own disk.
+`pai-release.key` lives in iCloud Drive, in `DawonAI/`, so either of the operator's Macs can sign (decided 2026-10-27). The file is the passphrase-encrypted key, never a decrypted copy. The passphrase is kept outside the Apple account: not in iCloud Keychain, not in Notes, not in iCloud Drive. Anyone with the Apple account gets only the encrypted file, and anyone with the passphrase alone gets nothing. A second copy stays offline on encrypted removable storage. The key never goes on a server, in a repository, or in CI.
+
+To sign from a Mac, point `PAI_SIGNING_KEY` at it:
+
+```sh
+PAI_SIGNING_KEY="$HOME/Library/Mobile Documents/com~apple~CloudDocs/DawonAI/pai-release.key" release/publish.sh
+```
+
+What this costs against the removable drive: the encrypted file is on every Mac signed in to the Apple account, all the time, so the passphrase's strength is what protects it from anyone who copies the file, and a Mac compromised while you type the passphrase gives away the key. Use a long, random passphrase.
 
 `signing-key.pub` is public. Copy it to `release/signing-key.pub` in place of the placeholder, then run:
 
