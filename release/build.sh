@@ -156,7 +156,10 @@ done
 # What `pai update` reads first, to tell whether there's anything newer. Signed like every file.
 printf '%s\n' "$version" >"$out/VERSION"
 
-(cd "$out" && shasum -a 256 -- * | grep -v ' SHA256SUMS$' >SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS)
+# Written outside $out and moved in: a file being written in $out could be caught by the * (it once
+# listed SHA256SUMS.tmp itself).
+(cd "$out" && shasum -a 256 -- * | grep -v ' SHA256SUMS$' >"$work/SHA256SUMS") && mv "$work/SHA256SUMS" "$out/SHA256SUMS"
+grep -q 'SHA256SUMS' "$out/SHA256SUMS" && { echo "build: SHA256SUMS lists itself or a temporary file" >&2; exit 1; }
 
 step "signing SHA256SUMS with key $KEY_ID"
 SIGNING_KEY="$PAI_SIGNING_KEY"
