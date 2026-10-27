@@ -9,7 +9,8 @@ set -eu
 cd "$(dirname "$0")/.."
 site="${1:?usage: release/site-files.sh SITE_DIST}"
 dist="$(pwd)/dist"
-[ -f "$dist/latest/SHA256SUMS.sig" ] || { echo "site-files: no signed release in $dist/latest" >&2; exit 1; }
+key_id="$(sed -n "s/^SIGNING_KEY_ID='\(.*\)'$/\1/p" install.sh)"
+[ -f "$dist/latest/SHA256SUMS.$key_id.sig" ] || { echo "site-files: no release in $dist/latest signed with key $key_id" >&2; exit 1; }
 version="$(cat "$dist/latest/VERSION")"
 [ -d "$dist/$version" ] || { echo "site-files: no $dist/$version" >&2; exit 1; }
 [ -d "$site/pai" ] || { echo "site-files: $site/pai is missing; build the site first" >&2; exit 1; }

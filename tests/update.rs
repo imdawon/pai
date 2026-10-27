@@ -64,7 +64,7 @@ impl Release {
             let h: String = Sha256::digest(&files[&n]).iter().map(|b| format!("{b:02x}")).collect();
             sums.push_str(&format!("{h}  {n}\n"));
         }
-        files.insert("SHA256SUMS.sig".into(), key.sign(sums.as_bytes()).as_ref().to_vec());
+        files.insert(format!("SHA256SUMS.{}.sig", key_id(key)), key.sign(sums.as_bytes()).as_ref().to_vec());
         files.insert("SHA256SUMS".into(), sums.into_bytes());
         *self.files.lock().unwrap() = files;
     }
@@ -77,6 +77,11 @@ impl Release {
 fn keypair() -> Ed25519KeyPair {
     let pkcs8 = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
     Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap()
+}
+
+/// What release/signing.sh names the key's signature files by.
+fn key_id(key: &Ed25519KeyPair) -> String {
+    pai::update::parse_key(&pem(key)).unwrap().id
 }
 
 fn pem(key: &Ed25519KeyPair) -> String {
@@ -155,13 +160,53 @@ fn keeps_the_same_or_older_release() {
 
 #[test]
 fn refuses_a_release_signed_by_another_key() {
+    let trusted = keypair();
+    let other = keypair();
     let release = Release::serve();
-    let i = install(&keypair());
-    release.publish(&keypair(), "99.0.0", NEW_BINARY);
+    let i = install(&trusted);
+    release.publish(&other, "99.0.0", NEW_BINARY);
+    // Another key's signature has another name, so pai finds none of its own key's.
+    let out = update(&i, &release);
+    assert!(!out.status.success());
+    assert!(unchanged(&i.bin));
+    // Put under the trusted key's name, it doesn't verify.
+    let sig = release.files.lock().unwrap()[&format!("SHA256SUMS.{}.sig", key_id(&other))].clone();
+    release.set(&format!("SHA256SUMS.{}.sig", key_id(&trusted)), &sig);
     let out = update(&i, &release);
     assert!(!out.status.success());
     assert!(text(&out.stderr).contains("isn't signed with pai's release key"), "{}", text(&out.stderr));
     assert!(unchanged(&i.bin));
+}
+
+#[test]
+fn reads_only_its_own_keys_signature_not_the_old_file_name() {
+    let key = keypair();
+    let release = Release::serve();
+    let i = install(&key);
+    release.publish(&key, "99.0.0", NEW_BINARY);
+    // The same valid signature, but only under the name pai up to 0.1.9 reads.
+    let name = format!("SHA256SUMS.{}.sig", key_id(&key));
+    let sig = release.files.lock().unwrap().remove(&name).unwrap();
+    release.set("SHA256SUMS.sig", &sig);
+    let out = update(&i, &release);
+    assert!(!out.status.success(), "{}", text(&out.stdout));
+    assert!(unchanged(&i.bin));
+}
+
+#[test]
+fn installs_a_hand_over_release_signed_by_both_keys() {
+    // What 0.1.10 publishes: the new key's signature under its own name, and the old key's under
+    // the name pai up to 0.1.9 reads. This pai trusts the new key and uses its file.
+    let new = keypair();
+    let old = keypair();
+    let release = Release::serve();
+    let i = install(&new);
+    release.publish(&new, "99.0.0", NEW_BINARY);
+    let sums = release.files.lock().unwrap()["SHA256SUMS"].clone();
+    release.set("SHA256SUMS.sig", old.sign(&sums).as_ref());
+    let out = update(&i, &release);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(fs::read(&i.bin).unwrap(), NEW_BINARY);
 }
 
 #[test]

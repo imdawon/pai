@@ -45,7 +45,10 @@ PAI_RELEASE_API_PINS="$current,$spare" sh release/build.sh
 
 version="$(awk -F'"' '/^version *=/ { print $2; exit }' Cargo.toml)"
 dist="$root/dist"
-[ -f "$dist/latest/SHA256SUMS.sig" ] || fail "release/build.sh left no signed release in dist/latest"
+key_id="$(sed -n "s/^SIGNING_KEY_ID='\(.*\)'$/\1/p" install.sh)"
+[ -f "$dist/latest/SHA256SUMS.$key_id.sig" ] || fail "release/build.sh left no release in dist/latest signed with key $key_id"
+# Every signature file: this key's, and while the key changes, the old key's.
+sigs="$(cd "$dist/latest" && ls SHA256SUMS*.sig SHA256SUMS*.sshsig)"
 
 step "site for $domain"
 (cd "$site" && node tools/build.mjs "$domain")
@@ -61,7 +64,7 @@ trap 'rm -rf "$tmp"' EXIT
 # Failing here stops the script before the box gets the release, so no installed pai updates.
 for attempt in 1 2 3 4 5 6 7 8; do
 	ok=1
-	for f in $(awk '{ print $2 }' "$dist/latest/SHA256SUMS") SHA256SUMS SHA256SUMS.sig SHA256SUMS.sshsig; do
+	for f in $(awk '{ print $2 }' "$dist/latest/SHA256SUMS") SHA256SUMS $sigs; do
 		f="${f#\*}"
 		if curl -fsS "https://$domain/pai/latest/$f" -o "$tmp/$f" 2>/dev/null && cmp -s "$tmp/$f" "$dist/latest/$f"; then
 			[ "$attempt" -gt 1 ] || echo "ok    $f"

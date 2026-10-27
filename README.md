@@ -31,15 +31,17 @@ Every release's `SHA256SUMS` is signed with this Ed25519 key, which is kept offl
 <!-- release-key -->
 ```text
 -----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAxIp4fBpqtyz7ci9B/bkVLVkyx++yJ/mRzn+WdzkqPGY=
+MCowBQYDK2VwAyEAAaxr74KfLKGdOR5jPlOo1ngZVAIOOafRkstl+2po5Cs=
 -----END PUBLIC KEY-----
 ```
 
 The same key as an OpenSSH allowed-signers line:
 
 ```text
-pai-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMSKeHwaarcs+3IvQf25FS1ZMsfvsif5kc5/lnc5Kjxm
+pai-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAGsa++CnyyhnTkeYz5TqNZ4GVQCDjmn0ZLLZftqaOQr
 ```
+
+Key ID `f0a52c411efb5295`: its signatures are `SHA256SUMS.f0a52c411efb5295.sig` and `SHA256SUMS.f0a52c411efb5295.sshsig`.
 <!-- /release-key -->
 
 Or paste `skill/dawonai/SKILL.md` into your coding agent, and it does all of this for you.
@@ -130,7 +132,7 @@ cargo test --features test-mode
 
 | Path | Holds |
 |---|---|
-| `dist/<version>/` | `pai-{aarch64,x86_64}-apple-darwin`, `pai-{aarch64,x86_64}-unknown-linux-musl`, `pai-{x86_64,aarch64}-pc-windows-msvc.exe`, `dawonai-skill.zip`, `opencode-dawonai.ts`, `omp-dawonai.ts`, `SHA256SUMS`, and its signatures `SHA256SUMS.sig` and `SHA256SUMS.sshsig` |
+| `dist/<version>/` | `pai-{aarch64,x86_64}-apple-darwin`, `pai-{aarch64,x86_64}-unknown-linux-musl`, `pai-{x86_64,aarch64}-pc-windows-msvc.exe`, `dawonai-skill.zip`, `opencode-dawonai.ts`, `omp-dawonai.ts`, `SHA256SUMS`, and its signatures `SHA256SUMS.<key id>.sig` and `SHA256SUMS.<key id>.sshsig` (and, in the hand-over release 0.1.10, the old key's `SHA256SUMS.sig` and `.sshsig`) |
 | `dist/latest/` | A copy of the newest version, which the installers download from |
 | `dist/index.html`, `install.sh`, `install.ps1` | The release page and the installers |
 

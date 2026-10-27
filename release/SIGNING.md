@@ -9,12 +9,14 @@ A pai release carries two kinds of signature, or will:
 
 `SHA256SUMS` lists the SHA-256 of every file in a release. Before this signature, it came from the same web server as the binaries, so whoever could change a binary on that server could change its checksum too. The signature is made with a private key that never touches the server, so a changed binary or a changed `SHA256SUMS` fails the check.
 
-Each release has two signature files, made with the same key:
+Each release has two signature files, made with the same key and named after it. `<id>` is the key's ID, the first 16 hex digits of the SHA-256 of its DER public key; the installers and pai's README carry it with the key.
 
 | File | Holds | Checked by |
 |---|---|---|
-| `SHA256SUMS.sig` | The 64-byte Ed25519 signature of `SHA256SUMS` | `openssl pkeyutl -verify -rawin`, OpenSSL 3 or later |
-| `SHA256SUMS.sshsig` | The same key's signature in OpenSSH's format, namespace `pai-release` | `ssh-keygen -Y verify`, OpenSSH 8.1 or later |
+| `SHA256SUMS.<id>.sig` | The 64-byte Ed25519 signature of `SHA256SUMS` | `pai update`; `openssl pkeyutl -verify -rawin`, OpenSSL 3 or later |
+| `SHA256SUMS.<id>.sshsig` | The same key's signature in OpenSSH's format, namespace `pai-release` | `ssh-keygen -Y verify`, OpenSSH 8.1 or later |
+
+Releases up to 0.1.9 named them `SHA256SUMS.sig` and `SHA256SUMS.sshsig`, and pai up to 0.1.9 reads only those names. Naming the files after the key lets one release carry two keys' signatures while the key changes (below).
 
 There are two because no one tool that checks Ed25519 ships on every OS. `release/signing.sh` makes both with OpenSSL alone.
 
@@ -103,9 +105,28 @@ ssh-keygen -Y verify -f allowed_signers -I pai-release -n pai-release -s SHA256S
 
 Then check the file against `SHA256SUMS`: `shasum -a 256 -c SHA256SUMS --ignore-missing` (macOS), `sha256sum -c SHA256SUMS --ignore-missing` (Linux), or compare `Get-FileHash <file>` by eye (Windows).
 
+## Changing the key
+
+Every installed pai has the key it was built with, and checks each update against that key alone. Changing the key therefore takes one hand-over release, signed with both:
+
+1. Make the new key (above) and run `release/embed-key.sh`. Save the old public key as `release/handover-key.pub`: `git show HEAD:release/signing-key.pub > release/handover-key.pub`.
+2. Publish with both private keys. `release/build.sh` refuses to build without the old one while `release/handover-key.pub` exists:
+
+   ```sh
+   PAI_SIGNING_KEY=<new key> PAI_HANDOVER_KEY=<old key> release/publish.sh
+   ```
+
+   The release gets `SHA256SUMS.<new id>.sig` and `.sshsig` from the new key, and `SHA256SUMS.sig` and `.sshsig` from the old one. Installed copies check the old key's file, install the release, and from then on check the new key. New installs use the new key at once: each one downloads a fresh installer.
+3. Delete `release/handover-key.pub` in the next commit, so later releases carry the new key's signatures only. An installed pai that didn't update during the hand-over can't update after it; it needs the installer run once.
+4. Delete every copy of the old private key, and say on the site and GitHub that it's retired.
+
+A leaked key still signs: until each installed copy takes the hand-over release, whoever holds the old key and controls the site or the box could ship it a release. Publish the hand-over release quickly.
+
 ## Losing or leaking the key
 
-There's no way to revoke a key. If the key leaks, or both copies are lost, make a new one, run `release/embed-key.sh`, publish it everywhere above, and say on the site and GitHub that the old key is retired. Each install downloads a fresh installer, so new installs use the new key at once.
+There's no way to revoke a key. If the key leaks, change it as above. If every copy is lost, there's no hand-over release: make a new key, run `release/embed-key.sh`, publish it everywhere above, and installed copies need the installer run once.
+
+**2026-10-27:** the key with ID `52856a9eb2b9d05b` was retired after its passphrase was pasted into a chat. pai 0.1.10 is the hand-over release to the key with ID `f0a52c411efb5295`.
 
 ## Publisher identity: macOS
 

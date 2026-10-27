@@ -165,8 +165,10 @@ pub fn run(env: &Env) -> Result<Outcome> {
     }
 
     let sums = get(&http, &format!("{base}/SHA256SUMS"), MAX_TEXT)?;
-    let sig = get(&http, &format!("{base}/SHA256SUMS.sig"), MAX_TEXT)?;
-    verify_signature(&key, &sums, &sig)?;
+    // Named after the key, so a release can carry the old key's signature as well while the key
+    // changes (release/SIGNING.md). pai up to 0.1.9 reads SHA256SUMS.sig.
+    let sig = get(&http, &format!("{base}/SHA256SUMS.{}.sig", key.id), MAX_TEXT)?;
+    verify_signature(&key.raw, &sums, &sig)?;
     let hashes = parse_sums(&sums)?;
     check_hash(&hashes, "VERSION", &announced)?;
 
@@ -216,9 +218,16 @@ fn get(http: &reqwest::blocking::Client, url: &str, limit: u64) -> Result<Vec<u8
     Ok(body)
 }
 
-/// The release key's raw 32 bytes, from the PEM built into `pai`. Staging builds can swap it for a
-/// test key with `PAI_TEST_RELEASE_KEY` (the same PEM).
-fn release_key(env: &Env) -> Result<[u8; 32]> {
+/// The release key: its raw 32 bytes, and its ID, which names its signature file: the first 16 hex
+/// digits of the SHA-256 of its DER public key, as release/signing.sh computes it.
+pub struct ReleaseKey {
+    pub raw: [u8; 32],
+    pub id: String,
+}
+
+/// The release key from the PEM built into `pai`. Staging builds can swap it for a test key with
+/// `PAI_TEST_RELEASE_KEY` (the same PEM).
+fn release_key(env: &Env) -> Result<ReleaseKey> {
     #[cfg(feature = "test-mode")]
     if let Some(path) = env.var("PAI_TEST_RELEASE_KEY") {
         let pem = fs::read_to_string(path).map_err(|e| io_err("read", Path::new(path), e))?;
@@ -228,7 +237,7 @@ fn release_key(env: &Env) -> Result<[u8; 32]> {
     parse_key(RELEASE_KEY_PEM)
 }
 
-fn parse_key(pem: &str) -> Result<[u8; 32]> {
+pub fn parse_key(pem: &str) -> Result<ReleaseKey> {
     let b64: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
     let der = B64.decode(b64.trim()).map_err(|_| Error::Update("the release key isn't valid base64".into()))?;
     // An Ed25519 SubjectPublicKeyInfo is a fixed 12-byte header and the 32-byte key.
@@ -236,7 +245,8 @@ fn parse_key(pem: &str) -> Result<[u8; 32]> {
     if der.len() != 44 || der[..12] != PREFIX {
         return Err(Error::Update("the release key isn't an Ed25519 public key".into()));
     }
-    Ok(der[12..].try_into().expect("32 bytes"))
+    let id = Sha256::digest(&der).iter().take(8).map(|b| format!("{b:02x}")).collect();
+    Ok(ReleaseKey { raw: der[12..].try_into().expect("32 bytes"), id })
 }
 
 fn verify_signature(key: &[u8; 32], sums: &[u8], sig: &[u8]) -> Result<()> {
@@ -384,7 +394,11 @@ mod tests {
 
     #[test]
     fn reads_the_built_in_release_key() {
-        parse_key(RELEASE_KEY_PEM).unwrap();
+        let key = parse_key(RELEASE_KEY_PEM).unwrap();
+        // The same ID release/embed-key.sh wrote into the installers, so pai and the installers read
+        // the same signature file.
+        let install = include_str!("../install.sh");
+        assert!(install.contains(&format!("\nSIGNING_KEY_ID='{}'\n", key.id)), "key ID {} isn't install.sh's", key.id);
     }
 
     #[test]

@@ -1,9 +1,13 @@
 # Shared by release/build.sh and release/embed-key.sh: the Ed25519 release key and the two
 # signatures made with it over SHA256SUMS. Sourced, not run. See release/SIGNING.md.
 #
-# SHA256SUMS.sig is the raw 64-byte Ed25519 signature of SHA256SUMS, which OpenSSL 3 checks.
-# SHA256SUMS.sshsig is the same key's signature in OpenSSH's format (namespace pai-release), which
-# `ssh-keygen -Y verify` checks: macOS ships OpenSSH but no OpenSSL with Ed25519.
+# Each signature file is named after the key that made it, so a release can carry signatures from
+# two keys while the key changes (release/SIGNING.md, "Changing the key"):
+# SHA256SUMS.<id>.sig is the raw 64-byte Ed25519 signature of SHA256SUMS, which OpenSSL 3 checks.
+# SHA256SUMS.<id>.sshsig is the same key's signature in OpenSSH's format (namespace pai-release),
+# which `ssh-keygen -Y verify` checks: macOS ships OpenSSH but no OpenSSL with Ed25519.
+# <id> is the key's ID: the first 16 hex digits of the SHA-256 of its DER public key (SPKI).
+# Releases up to 0.1.9 named them SHA256SUMS.sig and SHA256SUMS.sshsig, which pai up to 0.1.9 reads.
 
 SIGNING_NAMESPACE=pai-release
 
@@ -37,7 +41,8 @@ sfile() {
 }
 
 # Reads the PEM public key $1 into $2/spki.der and $2/pk.ssh, and sets SPKI_B64 (what OpenSSL
-# reads) and SSH_B64 (the key in an OpenSSH allowed-signers line). Fails unless it's Ed25519.
+# reads), SSH_B64 (the key in an OpenSSH allowed-signers line) and KEY_ID. Fails unless it's
+# Ed25519.
 key_material() {
 	"$OPENSSL" pkey -pubin -in "$1" -outform der -out "$2/spki.der" 2>/dev/null || return 1
 	"$OPENSSL" pkey -pubin -in "$1" -text -noout 2>/dev/null | grep -q '^ED25519 Public-Key' || return 1
@@ -49,6 +54,7 @@ key_material() {
 	} >"$2/pk.ssh"
 	SPKI_B64="$(base64 <"$2/spki.der" | tr -d '\n')"
 	SSH_B64="$(base64 <"$2/pk.ssh" | tr -d '\n')"
+	KEY_ID="$("$OPENSSL" dgst -sha256 -binary "$2/spki.der" | od -An -tx1 | tr -d ' \n' | cut -c1-16)"
 }
 
 # Ed25519-signs file $1 into $2 with the private key $SIGNING_KEY. $SIGNING_PASS, when set, is the

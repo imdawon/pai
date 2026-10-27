@@ -18,13 +18,19 @@ box_opts=""
 [ -f "$box_key" ] && box_opts="-i $box_key -o IdentitiesOnly=yes"
 on_box() { ssh $box_opts "$box" "$@"; }
 
+key_id="$(sed -n "s/^SIGNING_KEY_ID='\(.*\)'$/\1/p" "$(dirname "$0")/../install.sh")"
+[ -n "$key_id" ] || fail "install.sh has no SIGNING_KEY_ID"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 cd "$tmp"
 
 echo "== downloading $base/"
-for f in VERSION SHA256SUMS SHA256SUMS.sig SHA256SUMS.sshsig; do
+# This key's signatures (its ID is in install.sh), and the old key's while the key changes.
+for f in VERSION SHA256SUMS "SHA256SUMS.$key_id.sig" "SHA256SUMS.$key_id.sshsig"; do
   curl -fsSLo "$f" "$base/$f" || fail "couldn't download $f"
+done
+for f in SHA256SUMS.sig SHA256SUMS.sshsig; do
+  curl -fsSLo "$f" "$base/$f" 2>/dev/null || rm -f "$f"
 done
 version="$(cat VERSION)"
 awk '{ print $2 }' SHA256SUMS | sed 's/^\*//' | while read -r f; do

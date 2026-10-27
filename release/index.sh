@@ -10,6 +10,9 @@ SITE="${SITE%/}"
 dist="$(pwd)/dist"
 out="$dist/$version"
 [ -f "$out/SHA256SUMS" ] || { echo "index: no $out/SHA256SUMS; run release/build.sh" >&2; exit 1; }
+# The release key's ID, which names its signature files (release/signing.sh).
+key_id="$(sed -n "s/^SIGNING_KEY_ID='\(.*\)'$/\1/p" install.sh)"
+[ -n "$key_id" ] || { echo "index: install.sh has no SIGNING_KEY_ID; run release/embed-key.sh" >&2; exit 1; }
 
 size() {
 	n="$(stat -f %z "$1")"
@@ -27,15 +30,17 @@ describe() {
 	opencode-dawonai.ts) echo "OpenCode plugin: copy to ~/.config/opencode/plugins/dawonai.ts" ;;
 	omp-dawonai.ts) echo "OMP extension: copy to ~/.omp/agent/extensions/dawonai.ts" ;;
 	SHA256SUMS) echo "Checksums for every file above" ;;
-	SHA256SUMS.sig) echo "Ed25519 signature of SHA256SUMS, for OpenSSL 3" ;;
-	SHA256SUMS.sshsig) echo "The same signature in OpenSSH's format, for ssh-keygen" ;;
+	"SHA256SUMS.$key_id.sig") echo "Ed25519 signature of SHA256SUMS, for OpenSSL 3" ;;
+	"SHA256SUMS.$key_id.sshsig") echo "The same signature in OpenSSH's format, for ssh-keygen" ;;
+	SHA256SUMS.sig | SHA256SUMS.sshsig) echo "The retired key's signature, for pai 0.1.9 and older to update" ;;
 	*) echo "" ;;
 	esac
 }
 rows=""
 for f in pai-aarch64-apple-darwin pai-x86_64-apple-darwin pai-x86_64-unknown-linux-musl \
 	pai-aarch64-unknown-linux-musl pai-x86_64-pc-windows-msvc.exe pai-aarch64-pc-windows-msvc.exe \
-	dawonai-skill.zip opencode-dawonai.ts omp-dawonai.ts SHA256SUMS SHA256SUMS.sig SHA256SUMS.sshsig; do
+	dawonai-skill.zip opencode-dawonai.ts omp-dawonai.ts SHA256SUMS "SHA256SUMS.$key_id.sig" "SHA256SUMS.$key_id.sshsig" \
+	$(cd "$out" && ls SHA256SUMS.sig SHA256SUMS.sshsig 2>/dev/null); do
 	hash="$(awk -v f="$f" '$2 == f { print $1 }' "$out/SHA256SUMS")"
 	rows="$rows
       <tr><td><a href=\"latest/$f\">$f</a><span>$(describe "$f")</span></td><td>$(size "$out/$f")</td><td><code>${hash:-}</code></td></tr>"
@@ -96,9 +101,9 @@ cat >"$dist/index.html" <<EOF
 
   <section>
     <h2>Release key</h2>
-    <p>Every release's <code>SHA256SUMS</code> is signed with this Ed25519 key, which is kept offline. The installers carry the same key, and so does pai's README on GitHub. Compare them.</p>
+    <p>Every release's <code>SHA256SUMS</code> is signed with this Ed25519 key, ID <code>$key_id</code>. The installers carry the same key, and so does pai's README on GitHub. Compare them. The key changed on 2026-10-27; pai 0.1.10 was signed with the old key as well, so earlier versions could update to it.</p>
     <pre><code>$key</code></pre>
-    <p class="note">Check a release by hand with OpenSSL 3: save the key as <code>pai-release.pub</code>, then run <code>openssl pkeyutl -verify -pubin -inkey pai-release.pub -rawin -in SHA256SUMS -sigfile SHA256SUMS.sig</code>.</p>
+    <p class="note">Check a release by hand with OpenSSL 3: save the key as <code>pai-release.pub</code>, then run <code>openssl pkeyutl -verify -pubin -inkey pai-release.pub -rawin -in SHA256SUMS -sigfile SHA256SUMS.$key_id.sig</code>.</p>
   </section>
 
   <section>

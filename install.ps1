@@ -14,10 +14,12 @@ $ProgressPreference = 'SilentlyContinue'
 
 # The pai release key (release/signing-key.pub), written here by release/embed-key.sh. The same
 # key is in pai's README on GitHub and on https://privacyai.example/pai/.
-$signingKeySpki = 'MCowBQYDK2VwAyEAxIp4fBpqtyz7ci9B/bkVLVkyx++yJ/mRzn+WdzkqPGY='
-$signingKeySsh = 'AAAAC3NzaC1lZDI1NTE5AAAAIMSKeHwaarcs+3IvQf25FS1ZMsfvsif5kc5/lnc5Kjxm'
+$signingKeySpki = 'MCowBQYDK2VwAyEAAaxr74KfLKGdOR5jPlOo1ngZVAIOOafRkstl+2po5Cs='
+$signingKeySsh = 'AAAAC3NzaC1lZDI1NTE5AAAAIAGsa++CnyyhnTkeYz5TqNZ4GVQCDjmn0ZLLZftqaOQr'
+# Names this key's signature files, SHA256SUMS.<id>.sig and .sshsig.
+$signingKeyId = 'f0a52c411efb5295'
 
-if (-not $signingKeySpki -or -not $signingKeySsh) {
+if (-not $signingKeySpki -or -not $signingKeySsh -or -not $signingKeyId) {
     throw "pai install: this copy of install.ps1 has no pai release key, so it can't check the download. Use https://privacyai.example/pai/install.ps1"
 }
 
@@ -91,7 +93,7 @@ function Assert-Signed([string]$tmp, [string]$sums) {
     $keygen = Find-SshKeygen
     if ($keygen) {
         $sig = Join-Path $tmp 'SHA256SUMS.sshsig'
-        Invoke-WebRequest -UseBasicParsing -Uri "$base/SHA256SUMS.sshsig" -OutFile $sig
+        Invoke-WebRequest -UseBasicParsing -Uri "$base/SHA256SUMS.$signingKeyId.sshsig" -OutFile $sig
         $allowed = Join-Path $tmp 'allowed_signers'
         [IO.File]::WriteAllText($allowed, "pai-release ssh-ed25519 $signingKeySsh`n")
         $r = Invoke-Tool $keygen "-Y verify -f `"$allowed`" -I pai-release -n pai-release -s `"$sig`"" $sums
@@ -102,7 +104,7 @@ function Assert-Signed([string]$tmp, [string]$sums) {
     $openssl = Find-OpenSsl
     if ($openssl) {
         $sig = Join-Path $tmp 'SHA256SUMS.sig'
-        Invoke-WebRequest -UseBasicParsing -Uri "$base/SHA256SUMS.sig" -OutFile $sig
+        Invoke-WebRequest -UseBasicParsing -Uri "$base/SHA256SUMS.$signingKeyId.sig" -OutFile $sig
         $pem = Join-Path $tmp 'release-key.pem'
         [IO.File]::WriteAllText($pem, "-----BEGIN PUBLIC KEY-----`n$signingKeySpki`n-----END PUBLIC KEY-----`n")
         $r = Invoke-Tool $openssl "pkeyutl -verify -pubin -inkey `"$pem`" -rawin -in `"$sums`" -sigfile `"$sig`"" $null

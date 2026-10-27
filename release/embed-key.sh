@@ -35,9 +35,11 @@ line() {
 }
 
 line install.sh "SIGNING_KEY_SPKI='" "$SPKI_B64" "'" >"$work/install.sh.1"
-line "$work/install.sh.1" "SIGNING_KEY_SSH='" "$SSH_B64" "'" >"$work/install.sh"
+line "$work/install.sh.1" "SIGNING_KEY_SSH='" "$SSH_B64" "'" >"$work/install.sh.2"
+line "$work/install.sh.2" "SIGNING_KEY_ID='" "$KEY_ID" "'" >"$work/install.sh"
 line install.ps1 "\$signingKeySpki = '" "$SPKI_B64" "'" >"$work/install.ps1.1"
-line "$work/install.ps1.1" "\$signingKeySsh = '" "$SSH_B64" "'" >"$work/install.ps1"
+line "$work/install.ps1.1" "\$signingKeySsh = '" "$SSH_B64" "'" >"$work/install.ps1.2"
+line "$work/install.ps1.2" "\$signingKeyId = '" "$KEY_ID" "'" >"$work/install.ps1"
 
 # README.md: everything between the two markers.
 {
@@ -52,6 +54,8 @@ line "$work/install.ps1.1" "\$signingKeySsh = '" "$SSH_B64" "'" >"$work/install.
 	echo '```text'
 	echo "$SIGNING_NAMESPACE ssh-ed25519 $SSH_B64"
 	echo '```'
+	echo
+	echo "Key ID \`$KEY_ID\`: its signatures are \`SHA256SUMS.$KEY_ID.sig\` and \`SHA256SUMS.$KEY_ID.sshsig\`."
 } >"$work/readme-key"
 awk -v keyfile="$work/readme-key" '
 	/^<!-- release-key -->$/ { print; while ((getline l < keyfile) > 0) print l; skip = 1; found++; next }

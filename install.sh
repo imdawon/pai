@@ -15,8 +15,10 @@ esac
 
 # The pai release key (release/signing-key.pub), written here by release/embed-key.sh. The same
 # key is in pai's README on GitHub and on https://privacyai.example/pai/.
-SIGNING_KEY_SPKI='MCowBQYDK2VwAyEAxIp4fBpqtyz7ci9B/bkVLVkyx++yJ/mRzn+WdzkqPGY='
-SIGNING_KEY_SSH='AAAAC3NzaC1lZDI1NTE5AAAAIMSKeHwaarcs+3IvQf25FS1ZMsfvsif5kc5/lnc5Kjxm'
+SIGNING_KEY_SPKI='MCowBQYDK2VwAyEAAaxr74KfLKGdOR5jPlOo1ngZVAIOOafRkstl+2po5Cs='
+SIGNING_KEY_SSH='AAAAC3NzaC1lZDI1NTE5AAAAIAGsa++CnyyhnTkeYz5TqNZ4GVQCDjmn0ZLLZftqaOQr'
+# Names this key's signature files, SHA256SUMS.<id>.sig and .sshsig.
+SIGNING_KEY_ID='f0a52c411efb5295'
 
 BASE="${PAI_DOWNLOAD_BASE:-https://privacyai.example/pai/latest}"
 BASE="${BASE%/}"
@@ -27,7 +29,7 @@ fail() {
 	exit 1
 }
 
-[ -n "$SIGNING_KEY_SPKI" ] && [ -n "$SIGNING_KEY_SSH" ] ||
+[ -n "$SIGNING_KEY_SPKI" ] && [ -n "$SIGNING_KEY_SSH" ] && [ -n "$SIGNING_KEY_ID" ] ||
 	fail "this copy of install.sh has no pai release key, so it can't check the download. Use https://privacyai.example/pai/install.sh"
 
 case "$(uname -s)" in
@@ -94,13 +96,13 @@ not_signed() {
 
 check_signature() {
 	if openssl_can_verify; then
-		download "$BASE/SHA256SUMS.sig" "$tmp/SHA256SUMS.sig" || fail "couldn't download $BASE/SHA256SUMS.sig"
+		download "$BASE/SHA256SUMS.$SIGNING_KEY_ID.sig" "$tmp/SHA256SUMS.sig" || fail "couldn't download $BASE/SHA256SUMS.$SIGNING_KEY_ID.sig"
 		printf -- '-----BEGIN PUBLIC KEY-----\n%s\n-----END PUBLIC KEY-----\n' "$SIGNING_KEY_SPKI" >"$tmp/release-key.pem"
 		openssl pkeyutl -verify -pubin -inkey "$tmp/release-key.pem" -rawin \
 			-in "$tmp/SHA256SUMS" -sigfile "$tmp/SHA256SUMS.sig" >/dev/null 2>&1 || not_signed
 		echo "Checked the signature on SHA256SUMS with OpenSSL."
 	elif ssh_keygen_can_verify; then
-		download "$BASE/SHA256SUMS.sshsig" "$tmp/SHA256SUMS.sshsig" || fail "couldn't download $BASE/SHA256SUMS.sshsig"
+		download "$BASE/SHA256SUMS.$SIGNING_KEY_ID.sshsig" "$tmp/SHA256SUMS.sshsig" || fail "couldn't download $BASE/SHA256SUMS.$SIGNING_KEY_ID.sshsig"
 		echo "pai-release ssh-ed25519 $SIGNING_KEY_SSH" >"$tmp/allowed_signers"
 		ssh-keygen -Y verify -f "$tmp/allowed_signers" -I pai-release -n pai-release \
 			-s "$tmp/SHA256SUMS.sshsig" <"$tmp/SHA256SUMS" >/dev/null 2>&1 || not_signed
