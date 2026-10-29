@@ -238,6 +238,7 @@ fn handle(
                 .iter()
                 .map(|((plan, day, adult), kp)| IssuerKeyInfo::new_for(*plan, *adult, *day, &kp.pk).unwrap())
                 .collect(),
+            grants: 0,
         }),
         ("POST", "/v1/credentials") => {
             if let Err(r) = authenticate(&mut s, &method, &uri, &headers, &body) {

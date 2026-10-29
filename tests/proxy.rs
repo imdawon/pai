@@ -35,6 +35,8 @@ struct Seen {
     streams_header: Option<String>,
     /// How many requests to fail with `503` first.
     fail_first: usize,
+    /// The relay's grants time to name in `pai-grants` on every response.
+    grants_header: Option<String>,
 }
 
 /// A fake model API over TLS with a self-signed certificate for `localhost`. It records each
@@ -89,8 +91,9 @@ fn fake_gateway(seen: Arc<Mutex<Seen>>) -> (u16, String, String) {
                                     s.open += 1;
                                     s.most_open = s.most_open.max(s.open);
                                 }
-                                (status, body, open.then_some(s.slow).flatten(), s.announce.clone(), s.streams_header.clone())
+                                (status, body, open.then_some(s.slow).flatten(), s.announce.clone(), (s.streams_header.clone(), s.grants_header.clone()))
                             };
+                            let (limit, grants) = limit;
                             if let Some(d) = slow {
                                 tokio::time::sleep(d).await;
                             }
@@ -106,6 +109,9 @@ fn fake_gateway(seen: Arc<Mutex<Seen>>) -> (u16, String, String) {
                             }
                             if let Some(v) = &limit {
                                 builder = builder.header("pai-streams", v.as_str());
+                            }
+                            if let Some(v) = &grants {
+                                builder = builder.header("pai-grants", v.as_str());
                             }
                             Ok::<_, Infallible>(builder.body(http_body_util::Full::new(bytes::Bytes::from(body))).unwrap())
                         }
@@ -165,6 +171,7 @@ fn start(api_port: u16, ca_pem: &str, pin: &str) -> (Running, FakeRelay) {
     let port = free_port();
     t.env.vars.insert("PAI_PROXY_PORT".into(), port.to_string());
     t.env.vars.insert("PAI_TEST_RETRY_MS".into(), "1".into());
+    t.env.vars.insert("PAI_TEST_GRANTS_DELAY_MS".into(), "1".into());
     let key = app::local_key(&t.env).unwrap();
     let env = t.env.clone();
     std::thread::spawn(move || pai::proxy::run(env));
@@ -210,6 +217,45 @@ fn keeps_the_announced_release_from_the_tool() {
     assert_eq!(r.status().as_u16(), 200);
     assert_eq!(r.headers()["x-pai-proxy"], "1");
     assert!(r.headers().get("pai-latest").is_none(), "the announcement is for the proxy, not the coding tool");
+}
+
+#[test]
+fn a_new_grants_time_replaces_a_pass_with_the_old_adult_setting() {
+    let seen = Arc::new(Mutex::new(Seen { grants_header: Some("100".into()), ..Seen::default() }));
+    let (api_port, ca, pin) = fake_gateway(seen.clone());
+    let (p, relay) = start(api_port, &ca, &pin);
+    let adult_of = |i: usize| {
+        let s = seen.lock().unwrap();
+        let auth = s.requests[i].1.clone().unwrap();
+        pai_proto::Credential::decode(auth.trim_start_matches("Bearer ")).unwrap().adult
+    };
+    let settle = |issued: u32| {
+        for _ in 0..200 {
+            if relay.issued() == issued && relay.state.lock().unwrap().requests.iter().filter(|r| r.as_str() == "GET /v1/account").count() >= 3 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+
+    // The first time pai hears a grants time it checks the account once; nothing has changed.
+    assert_eq!(p.post("/v1/messages", Some(&p.key), &[]).0, 200);
+    assert!(!adult_of(0));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(relay.issued(), 1, "the pass still matches the account");
+
+    // The operator turns adult content on; the model API names a new grants time.
+    relay.state.lock().unwrap().adult = true;
+    seen.lock().unwrap().grants_header = Some("200".into());
+    assert_eq!(p.post("/v1/messages", Some(&p.key), &[]).0, 200);
+    assert!(!adult_of(1), "the request that brings the news still uses the old pass");
+    settle(2);
+    assert_eq!(relay.issued(), 2, "pai collected a pass with the new setting");
+
+    assert_eq!(p.post("/v1/messages", Some(&p.key), &[]).0, 200);
+    assert!(adult_of(2), "the next request carries the adult bit");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(relay.issued(), 2, "the same grants time isn't checked twice");
 }
 
 #[test]
