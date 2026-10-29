@@ -321,6 +321,39 @@ fn drop_passes_with_old_adult_setting(env: &Env, adult: bool) -> Result<bool> {
     Ok(dropped)
 }
 
+/// Where pai keeps the relay's grants time it last checked its account against (`pai-grants`).
+fn grants_file(env: &Env) -> PathBuf {
+    env.paths.config_dir.join("grants-checked")
+}
+
+/// The grants time this computer last checked its account against, if any.
+pub fn checked_grants(env: &Env) -> Option<i64> {
+    fs::read_to_string(grants_file(env)).ok()?.trim().parse().ok()
+}
+
+/// The model API announced a new grants time (`pai-grants`): what some account's credentials allow
+/// changed. Asks the relay for this account; if its adult content setting no longer matches the
+/// held passes, drops them and collects today's again at once. Every pai does this when the time
+/// changes, so the relay can't tell whose setting changed. Returns whether the passes were replaced.
+pub fn recheck_grants(env: &Env, grants: i64) -> Result<bool> {
+    let config = env.paired()?;
+    let key = env.device_key()?;
+    let _lock = lock(env)?;
+    let account = env.relay(&config, env.relay_timeout)?.account(&key, &config.device_id)?;
+    let dropped = drop_passes_with_old_adult_setting(env, account.adult)?;
+    if dropped && account.credential_plan.is_some() && account.status != "banned" {
+        // Collected now rather than with the next request, so the relay doesn't see it at the
+        // moment of use. If this fails, the next request collects it.
+        if let Ok((encoded, _)) = fetch_credential(env, &config, 0) {
+            env.keystore.set(CREDENTIAL, &encoded)?;
+        }
+    }
+    let path = grants_file(env);
+    fs::create_dir_all(&env.paths.config_dir).map_err(|e| io_err("create", &env.paths.config_dir, e))?;
+    fs::write(&path, format!("{grants}\n")).map_err(|e| io_err("write", &path, e))?;
+    Ok(dropped)
+}
+
 /// The plan of the credential this computer holds, without asking the relay.
 pub fn held_plan(env: &Env) -> Option<Plan> {
     let stored = env.keystore.get(CREDENTIAL).ok()??;

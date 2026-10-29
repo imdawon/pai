@@ -105,6 +105,8 @@ struct Proxy {
     update_poke: Notify,
     /// A second handle on the listening socket, for the updated `pai` to take over.
     handover: Mutex<Option<Handover>>,
+    /// The grants time last checked against (`pai-grants`), and whether a check is waiting to run.
+    grants: Mutex<(Option<i64>, bool)>,
 }
 
 /// The listening socket a proxy hands to the updated `pai` that replaces it, so connections that
@@ -204,6 +206,7 @@ pub fn run(env: Env) -> Result<()> {
             },
         };
         let handover = keep_for_handover(&listener);
+        let env_for_grants = env.clone();
         let proxy = Arc::new(Proxy {
             api: config.api_url.clone(),
             env,
@@ -218,6 +221,7 @@ pub fn run(env: Env) -> Result<()> {
             restart: AtomicBool::new(false),
             update_poke: Notify::new(),
             handover: Mutex::new(handover),
+            grants: Mutex::new((app::checked_grants(&env_for_grants), false)),
         });
         if proxy.env.prefetch {
             tokio::spawn(prefetch_loop(proxy.env.clone()));
@@ -510,7 +514,7 @@ const DROPPED: [HeaderName; 9] = [
 
 fn forwardable(name: &HeaderName) -> bool {
     !DROPPED.contains(name)
-        && !matches!(name.as_str(), "x-api-key" | "keep-alive" | LATEST | STREAMS)
+        && !matches!(name.as_str(), "x-api-key" | "keep-alive" | LATEST | STREAMS | GRANTS)
 }
 
 /// The model API names the latest pai release on every response, so a proxy hears of one on the
@@ -532,6 +536,42 @@ fn note_stream_limit(p: &Proxy, headers: &HeaderMap, credential: &str) {
     };
     let Ok(c) = Credential::decode(credential) else { return };
     *p.learned_streams.lock().unwrap() = Some((c.plan, n.clamp(1, MAX_LEARNED_STREAMS)));
+}
+
+/// The model API repeats the relay's grants time on every response. When it differs from the one
+/// this computer last checked, the account's adult content setting may have changed, so pai checks
+/// its account and replaces passes that carry the old setting. Meant for the proxy, not the tool.
+const GRANTS: &str = pai_proto::GRANTS_HEADER;
+
+/// The longest pai waits, at random, before that check, so the relay can't match the check to
+/// the request that announced the change.
+const GRANTS_MAX_DELAY: Duration = Duration::from_secs(180);
+
+fn note_grants(p: &Arc<Proxy>, headers: &HeaderMap) {
+    let Some(grants) = headers.get(GRANTS).and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<i64>().ok()) else {
+        return;
+    };
+    {
+        let mut g = p.grants.lock().unwrap();
+        if g.1 || g.0 == Some(grants) {
+            return;
+        }
+        g.1 = true;
+    }
+    let max = p.env.var("PAI_TEST_GRANTS_DELAY_MS").and_then(|v| v.parse().ok()).map_or(GRANTS_MAX_DELAY, Duration::from_millis);
+    let delay = Duration::from_millis(rand::Rng::gen_range(&mut rand::rngs::OsRng, 0..=max.as_millis() as u64));
+    let p = p.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        let env = p.env.clone();
+        let done = tokio::task::spawn_blocking(move || app::recheck_grants(&env, grants)).await;
+        let mut g = p.grants.lock().unwrap();
+        // On failure the next response tries again.
+        if matches!(done, Ok(Ok(_))) {
+            g.0 = Some(grants);
+        }
+        g.1 = false;
+    });
 }
 
 fn note_announced_release(p: &Arc<Proxy>, headers: &HeaderMap) {
@@ -600,6 +640,7 @@ async fn forward(p: Arc<Proxy>, req: Request) -> Response {
             Err(e) => return unreachable(&p.api, &e),
         };
         note_announced_release(&p, resp.headers());
+        note_grants(&p, resp.headers());
         note_stream_limit(&p, resp.headers(), &credential);
         let status = resp.status();
         let resp_headers = resp.headers().clone();
