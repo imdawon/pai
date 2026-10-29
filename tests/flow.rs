@@ -1,6 +1,6 @@
 mod common;
 
-use common::{ACCOUNT_ID, FakeRelay, TestEnv, issuer_public_key, today};
+use common::{ACCOUNT_ID, FakeRelay, TestEnv, issuer_public_key, issuer_public_key_for, today};
 use pai::app::{self, Clock};
 use pai::error::Error;
 use pai::keystore::{CREDENTIAL, DEVICE_KEY};
@@ -478,4 +478,62 @@ fn an_updated_proxy_keeps_the_local_key_an_older_pai_made() {
     app::credential(&t.env, false).unwrap();
     assert_eq!(app::local_key(&t.env).unwrap(), "pai-local-old", "the same key once the device key moves too");
     assert!(old.get(PROXY_KEY).unwrap().is_none(), "and gone from the old store");
+}
+
+#[test]
+fn turning_adult_content_on_replaces_the_held_passes() {
+    use pai::keystore::NEXT_CREDENTIAL;
+    let relay = FakeRelay::start(CODE);
+    let mut t = paired(&relay);
+
+    // Yesterday: a pass for yesterday, and today's collected ahead, both without the adult bit.
+    t.env.clock = Clock::Fixed(now_unix() - 86_400);
+    let old = app::credential(&t.env, false).unwrap();
+    assert!(!Credential::decode(&old).unwrap().adult);
+    assert!(app::prefetch(&t.env, Plan::Chat, today(), std::time::Duration::ZERO).unwrap());
+    let ahead = t.env.keystore.get(NEXT_CREDENTIAL).unwrap().unwrap();
+    assert!(!Credential::decode(&ahead).unwrap().adult);
+    assert_eq!(relay.issued(), 2);
+
+    // The operator turns adult content on. `pai status` sees it and drops the held passes.
+    relay.state.lock().unwrap().adult = true;
+    t.env.clock = Clock::System;
+    let status = app::status(&t.env).unwrap();
+    assert!(status.adult_changed && !status.credential_today && !status.credential_tomorrow);
+    assert!(status.to_string().contains("adult content was turned on or off"), "{status}");
+    assert!(t.env.keystore.get(CREDENTIAL).unwrap().is_none());
+    assert!(t.env.keystore.get(NEXT_CREDENTIAL).unwrap().is_none());
+
+    // The next request collects today's pass with the adult bit.
+    let token = app::credential(&t.env, false).unwrap();
+    let cred = Credential::decode(&token).unwrap();
+    assert!(cred.adult && cred.day == today());
+    cred.verify(issuer_public_key_for(Plan::Chat, today(), true)).unwrap();
+    assert_eq!(relay.issued(), 3);
+
+    // A second check changes nothing.
+    assert!(!app::status(&t.env).unwrap().adult_changed);
+    assert_eq!(app::credential(&t.env, false).unwrap(), token);
+}
+
+#[test]
+fn collecting_a_pass_drops_the_one_held_with_the_old_adult_setting() {
+    use pai::keystore::NEXT_CREDENTIAL;
+    let relay = FakeRelay::start(CODE);
+    let mut t = paired(&relay);
+    relay.state.lock().unwrap().adult = true;
+
+    // Yesterday, with adult content on: yesterday's pass, then the operator turns it off.
+    t.env.clock = Clock::Fixed(now_unix() - 86_400);
+    assert!(Credential::decode(&app::credential(&t.env, false).unwrap()).unwrap().adult);
+    relay.state.lock().unwrap().adult = false;
+
+    // The daily collection of the next pass also drops the held one with the old setting.
+    assert!(app::prefetch(&t.env, Plan::Chat, today(), std::time::Duration::ZERO).unwrap());
+    assert!(t.env.keystore.get(CREDENTIAL).unwrap().is_none());
+    let ahead = t.env.keystore.get(NEXT_CREDENTIAL).unwrap().unwrap();
+    assert!(!Credential::decode(&ahead).unwrap().adult);
+    let again = app::credential(&t.env, false).unwrap();
+    assert_eq!(Credential::decode(&again).unwrap().day, today() - 1, "yesterday's, fetched again");
+    assert!(!Credential::decode(&again).unwrap().adult);
 }

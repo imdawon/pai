@@ -305,6 +305,22 @@ fn cached_credential(env: &Env) -> Result<Option<String>> {
     stored_credential(env, CREDENTIAL, 0)
 }
 
+/// The account's adult content setting is inside each day pass, fixed when the pass is issued.
+/// When the setting has changed since, drops the held passes (today's and tomorrow's) that carry
+/// the old one, so the next request collects a pass with the new one. Only called when pai has
+/// fetched the account anyway, so it adds no request to the relay. Returns whether any was dropped.
+fn drop_passes_with_old_adult_setting(env: &Env, adult: bool) -> Result<bool> {
+    let mut dropped = false;
+    for name in [CREDENTIAL, NEXT_CREDENTIAL] {
+        let Some(stored) = env.keystore.get(name)? else { continue };
+        if pai_proto::Credential::decode(&stored).is_ok_and(|c| c.adult != adult) {
+            env.keystore.delete(name)?;
+            dropped = true;
+        }
+    }
+    Ok(dropped)
+}
+
 /// The plan of the credential this computer holds, without asking the relay.
 pub fn held_plan(env: &Env) -> Option<Plan> {
     let stored = env.keystore.get(CREDENTIAL).ok()??;
@@ -604,6 +620,8 @@ fn fetch_credential(env: &Env, config: &Config, offset: u32) -> Result<(String, 
     let day = period_now(plan, env.clock.now()) + offset;
     // Adult accounts' credentials come from the adult keys, so the model server allows erotica.
     let adult = account.adult;
+    // Callers hold the lock. A held pass with the old setting would otherwise last its period.
+    drop_passes_with_old_adult_setting(env, adult)?;
 
     let keys = relay.keys()?;
     let info = keys
@@ -707,6 +725,9 @@ pub struct Status {
     pub keystore: String,
     /// The relay no longer knows this device: it went 30 days unused, or was removed in Account.
     pub device_removed: bool,
+    /// Adult content was turned on or off for the account since the held passes were collected,
+    /// so this check dropped them.
+    pub adult_changed: bool,
     /// The harnesses `pai setup` has set up.
     pub harnesses: Vec<crate::setup::Tool>,
     /// What stops pai working, each with what to do; empty when it's configured properly.
@@ -730,13 +751,15 @@ pub fn status(env: &Env) -> Result<Status> {
             trust: trust(env, None),
             keystore,
             device_removed: false,
+            adult_changed: false,
             harnesses: crate::setup::set_up_tools(env),
             problems: vec![format!("This computer isn't paired. {SETUP_HINT}.")],
         });
     };
-    let credential_today = cached_credential(env).ok().flatten().is_some()
+    let mut credential_today = cached_credential(env).ok().flatten().is_some()
         || stored_credential(env, NEXT_CREDENTIAL, 0).ok().flatten().is_some();
-    let credential_tomorrow = stored_credential(env, NEXT_CREDENTIAL, 1).ok().flatten().is_some();
+    let mut credential_tomorrow = stored_credential(env, NEXT_CREDENTIAL, 1).ok().flatten().is_some();
+    let mut adult_changed = false;
     let hourly = held_plan(env).is_some_and(|p| Period::of(p) == Period::Hour);
     let mut device_removed = false;
     // Whether the plan is paid: None when it couldn't be checked.
@@ -748,6 +771,15 @@ pub fn status(env: &Env) -> Result<Status> {
             .and_then(|r| r.account(&key, &cfg.device_id))
         {
             Ok(a) => {
+                // Adult content was turned on or off for the account since the held passes were
+                // collected: drop them, so the next request gets one with the new setting.
+                if let Ok(_lock) = lock(env)
+                    && drop_passes_with_old_adult_setting(env, a.adult).unwrap_or(false)
+                {
+                    adult_changed = true;
+                    credential_today = false;
+                    credential_tomorrow = false;
+                }
                 paid = Some(a.plan.is_some() && a.credential_plan.is_some());
                 match (&a.plan, a.credential_plan) {
                     (Some(p), Some(_)) => format!("{} ({})", plan_label(p), a.status),
@@ -796,6 +828,7 @@ pub fn status(env: &Env) -> Result<Status> {
         trust,
         keystore,
         device_removed,
+        adult_changed,
         harnesses,
         problems,
     })
@@ -854,6 +887,9 @@ impl Status {
                 (true, false, false) => "none for this hour (1-day trial; `pai token` collects it)",
             }
         )?;
+        if self.adult_changed {
+            writeln!(f, "            The held ones were dropped: adult content was turned on or off for this account after they were collected.")?;
+        }
         writeln!(f, "Relay:      {}", c.relay_url)?;
         writeln!(f, "API:        {}", c.api_url)?;
         if let Some(ca) = &self.trust.test_ca {
