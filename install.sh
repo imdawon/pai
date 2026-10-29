@@ -20,7 +20,9 @@ SIGNING_KEY_SSH='AAAAC3NzaC1lZDI1NTE5AAAAIAGsa++CnyyhnTkeYz5TqNZ4GVQCDjmn0ZLLZft
 # Names this key's signature files, SHA256SUMS.<id>.sig and .sshsig.
 SIGNING_KEY_ID='f0a52c411efb5295'
 
-BASE="${PAI_DOWNLOAD_BASE:-https://privacyai.example/pai/latest}"
+# The model API's host serves the release, through the relay to the model server, so the download
+# doesn't pass through Cloudflare, which challenges curl from datacenter and VPN addresses.
+BASE="${PAI_DOWNLOAD_BASE:-https://api.privacyai.example/pai/latest}"
 BASE="${BASE%/}"
 BIN_DIR="${PAI_INSTALL_DIR:-$HOME/.local/bin}"
 
@@ -30,7 +32,7 @@ fail() {
 }
 
 [ -n "$SIGNING_KEY_SPKI" ] && [ -n "$SIGNING_KEY_SSH" ] && [ -n "$SIGNING_KEY_ID" ] ||
-	fail "this copy of install.sh has no pai release key, so it can't check the download. Use https://privacyai.example/pai/install.sh"
+	fail "this copy of install.sh has no pai release key, so it can't check the download. Use https://api.privacyai.example/pai/latest/install.sh"
 
 case "$(uname -s)" in
 Linux) os=unknown-linux-musl ;;

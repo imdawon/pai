@@ -8,7 +8,8 @@
 # release/current-api-pin (the box's TLS key belongs to its service users, so nothing here can read
 # it); the spare one is release/spare-api-pin (its private key stays offline, see
 # pai-gateway/deploy/CERTIFICATES.md). Both files are public.
-# Then copies it to the box, which serves it at https://api.<domain>/pai/latest/ for `pai update`.
+# Then copies it to the box, which serves it at https://api.<domain>/pai/latest/ for `pai update`,
+# with the installers, which the install commands download from there.
 # Needs ../privacy-ai, node, wrangler signed in to the Cloudflare account with the Pages project, and
 # SSH to the box as its admin (PAI_BOX, PAI_BOX_KEY, as pai-gateway/deploy/deploy.sh uses).
 set -eu
@@ -90,11 +91,19 @@ on_box test -w "$releases" || fail "$box has no $releases it can write to. Deplo
 on_box "rm -rf $releases/latest.new && mkdir $releases/latest.new"
 scp $box_opts -q "$dist/latest"/* "$box:$releases/latest.new/"
 on_box "rm -f $releases/latest.new/index.html"
+# The installers as the site serves them (its build fills in the domain), so installs can download
+# them from api.<domain>, which Cloudflare isn't in front of.
+scp $box_opts -q "$site/dist/site/pai/install.sh" "$site/dist/site/pai/install.ps1" "$box:$releases/latest.new/"
 # One rename, so pai never sees half of one release and half of another.
 on_box "cd $releases && rm -rf latest.old && { [ ! -e latest ] || mv latest latest.old; } && mv latest.new latest && rm -rf latest.old"
 api_version="$(curl -fsS "https://api.$domain/pai/latest/VERSION" || true)"
 [ "$api_version" = "$version" ] || fail "https://api.$domain/pai/latest/VERSION says '$api_version', not $version. Is the gateway deployed with PAI_RELEASES_DIR?"
 echo "ok    https://api.$domain/pai/latest/VERSION"
+for f in install.sh install.ps1; do
+	curl -fsS "https://api.$domain/pai/latest/$f" -o "$tmp/api-$f" && cmp -s "$tmp/api-$f" "$site/dist/site/pai/$f" ||
+		fail "https://api.$domain/pai/latest/$f isn't the $f the site build made"
+done
+echo "ok    https://api.$domain/pai/latest/install.sh and install.ps1"
 
 echo
 echo "pai $version is live at https://$domain/pai/latest/, and installed copies update to it within a day"

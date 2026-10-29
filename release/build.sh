@@ -197,7 +197,7 @@ cp -R "$out" "$dist/latest"
 cp install.sh install.ps1 "$dist/"
 
 step "index.html"
-PAI_SITE="https://$PAI_RELEASE_DOMAIN" sh release/index.sh "$version"
+PAI_SITE="https://$PAI_RELEASE_DOMAIN" PAI_API="$PAI_RELEASE_API_URL" sh release/index.sh "$version"
 
 step "done"
 ls -l "$out"

@@ -7,6 +7,9 @@ cd "$(dirname "$0")/.."
 version="${1:?usage: release/index.sh <version>}"
 SITE="${PAI_SITE:-https://privacyai.example}"
 SITE="${SITE%/}"
+# The model API's host, which serves the installers and latest/ outside Cloudflare.
+API="${PAI_API:-https://api.privacyai.example}"
+API="${API%/}"
 dist="$(pwd)/dist"
 out="$dist/$version"
 [ -f "$out/SHA256SUMS" ] || { echo "index: no $out/SHA256SUMS; run release/build.sh" >&2; exit 1; }
@@ -93,10 +96,10 @@ cat >"$dist/index.html" <<EOF
   <section>
     <h2>Install</h2>
     <p>macOS and Linux:</p>
-    <pre><code>curl -fsSL $SITE/pai/install.sh -o /tmp/pai-install.sh &amp;&amp; sh /tmp/pai-install.sh</code></pre>
+    <pre><code>curl -fsSL $API/pai/latest/install.sh -o /tmp/pai-install.sh &amp;&amp; sh /tmp/pai-install.sh</code></pre>
     <p>Windows (PowerShell):</p>
-    <pre><code>irm $SITE/pai/install.ps1 -OutFile \$env:TEMP\\pai-install.ps1; powershell -ExecutionPolicy Bypass -File \$env:TEMP\\pai-install.ps1</code></pre>
-    <p class="note">The installers download from <a href="latest/">latest/</a>, check the signature on <code>SHA256SUMS</code> with the pai release key, check the file against <code>SHA256SUMS</code>, and refuse to install if either check fails. Read them first: <a href="install.sh">install.sh</a>, <a href="install.ps1">install.ps1</a>.</p>
+    <pre><code>irm $API/pai/latest/install.ps1 -OutFile \$env:TEMP\\pai-install.ps1; powershell -ExecutionPolicy Bypass -File \$env:TEMP\\pai-install.ps1</code></pre>
+    <p class="note">The installers and the files in <a href="latest/">latest/</a> are also served at <code>$API/pai/latest/</code>, which the commands above use. The installers download from there, check the signature on <code>SHA256SUMS</code> with the pai release key, check the file against <code>SHA256SUMS</code>, and refuse to install if either check fails. Read them first: <a href="install.sh">install.sh</a>, <a href="install.ps1">install.ps1</a>.</p>
   </section>
 
   <section>

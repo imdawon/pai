@@ -1,8 +1,9 @@
 #!/bin/sh
 # Copies the pai release the site serves to the box, for `pai update`: the last step of
 # release/publish.sh, for when the machine that signed the release can't reach the box.
-# Downloads https://<domain>/pai/latest/, checks every file against its SHA256SUMS, and swaps it
-# in on the box in one rename. Needs SSH to the box as its admin (PAI_BOX, PAI_BOX_KEY).
+# Downloads https://<domain>/pai/latest/ and the installers, checks every release file against its
+# SHA256SUMS, and swaps them in on the box in one rename. Needs SSH to the box as its admin
+# (PAI_BOX, PAI_BOX_KEY).
 #
 #   release/copy-to-box.sh
 set -eu
@@ -38,6 +39,12 @@ awk '{ print $2 }' SHA256SUMS | sed 's/^\*//' | while read -r f; do
   curl -fsSLo "$f" "$base/$f" || fail "couldn't download $f"
 done
 shasum -a 256 -c SHA256SUMS >/dev/null || fail "a download doesn't match SHA256SUMS"
+# The installers, which the install commands download from api.<domain>. They aren't in SHA256SUMS:
+# they carry the release key that checks it.
+for f in install.sh install.ps1; do
+  curl -fsSLo "$f" "https://$domain/pai/$f" || fail "couldn't download $f"
+  grep -q "$key_id" "$f" || fail "https://$domain/pai/$f doesn't carry release key $key_id"
+done
 echo "ok    pai $version, $(wc -l <SHA256SUMS | tr -d ' ') files match SHA256SUMS"
 
 echo "== copying to the box"
@@ -49,3 +56,7 @@ on_box "cd $releases && rm -rf latest.old && { [ ! -e latest ] || mv latest late
 api_version="$(curl -fsS "https://api.$domain/pai/latest/VERSION" || true)"
 [ "$api_version" = "$version" ] || fail "https://api.$domain/pai/latest/VERSION says '$api_version', not $version"
 echo "ok    https://api.$domain/pai/latest/VERSION is $version"
+for f in install.sh install.ps1; do
+  curl -fsS "https://api.$domain/pai/latest/$f" | cmp -s - "$f" || fail "https://api.$domain/pai/latest/$f isn't the site's $f"
+done
+echo "ok    https://api.$domain/pai/latest/install.sh and install.ps1 match the site's"

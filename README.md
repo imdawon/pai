@@ -11,16 +11,16 @@ The account key never reaches this machine. What `pai` holds is a device key, wh
 macOS and Linux:
 
 ```sh
-curl -fsSL https://privacyai.example/pai/install.sh -o /tmp/pai-install.sh && sh /tmp/pai-install.sh
+curl -fsSL https://api.privacyai.example/pai/latest/install.sh -o /tmp/pai-install.sh && sh /tmp/pai-install.sh
 ```
 
 Windows (PowerShell):
 
 ```powershell
-irm https://privacyai.example/pai/install.ps1 -OutFile $env:TEMP\pai-install.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\pai-install.ps1
+irm https://api.privacyai.example/pai/latest/install.ps1 -OutFile $env:TEMP\pai-install.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\pai-install.ps1
 ```
 
-Both download the binary for your OS and CPU, check the signature on `SHA256SUMS` with the pai release key (below), check the binary against `SHA256SUMS`, and install to `~/.local/bin` or `%LOCALAPPDATA%\pai`. `PAI_DOWNLOAD_BASE` changes where they download from, and `PAI_INSTALL_DIR` where they install.
+Both commands, and the installers' downloads, go to `api.privacyai.example`, the model API's host, which the relay passes to the model server. Cloudflare isn't in that path, so its bot checks don't stop installs from servers and VPNs. Both installers download the binary for your OS and CPU, check the signature on `SHA256SUMS` with the pai release key (below), check the binary against `SHA256SUMS`, and install to `~/.local/bin` or `%LOCALAPPDATA%\pai`. `PAI_DOWNLOAD_BASE` changes where they download from, and `PAI_INSTALL_DIR` where they install.
 
 The installers check the signature with OpenSSL 3, or with `ssh-keygen` from OpenSSH 8.1 or later. macOS ships OpenSSH. Ubuntu 22.04, Debian 12, Fedora 36 and RHEL 9 and later ship OpenSSL 3. On Windows, `install.ps1` uses the Windows OpenSSH client (**Settings > System > Optional features**), or an OpenSSL 3 such as the one Git for Windows carries. With neither, the installers warn and install with only the checksum, which comes from the same server as the binary. A signature that doesn't match always stops them.
 

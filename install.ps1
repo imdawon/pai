@@ -20,10 +20,12 @@ $signingKeySsh = 'AAAAC3NzaC1lZDI1NTE5AAAAIAGsa++CnyyhnTkeYz5TqNZ4GVQCDjmn0ZLLZf
 $signingKeyId = 'f0a52c411efb5295'
 
 if (-not $signingKeySpki -or -not $signingKeySsh -or -not $signingKeyId) {
-    throw "pai install: this copy of install.ps1 has no pai release key, so it can't check the download. Use https://privacyai.example/pai/install.ps1"
+    throw "pai install: this copy of install.ps1 has no pai release key, so it can't check the download. Use https://api.privacyai.example/pai/latest/install.ps1"
 }
 
-$base = if ($env:PAI_DOWNLOAD_BASE) { $env:PAI_DOWNLOAD_BASE.TrimEnd('/') } else { 'https://privacyai.example/pai/latest' }
+# The model API's host serves the release, through the relay to the model server, so the download
+# doesn't pass through Cloudflare, which challenges scripts from datacenter and VPN addresses.
+$base = if ($env:PAI_DOWNLOAD_BASE) { $env:PAI_DOWNLOAD_BASE.TrimEnd('/') } else { 'https://api.privacyai.example/pai/latest' }
 $dir = if ($env:PAI_INSTALL_DIR) { $env:PAI_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'pai' }
 
 # A 32-bit or emulated PowerShell reports the real CPU in PROCESSOR_ARCHITEW6432.

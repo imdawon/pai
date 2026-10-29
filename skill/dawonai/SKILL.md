@@ -35,13 +35,13 @@ Skip this if `pai --version` already works.
 macOS and Linux:
 
 ```sh
-curl -fsSL https://privacyai.example/pai/install.sh -o /tmp/pai-install.sh && sh /tmp/pai-install.sh
+curl -fsSL https://api.privacyai.example/pai/latest/install.sh -o /tmp/pai-install.sh && sh /tmp/pai-install.sh
 ```
 
 Windows (PowerShell):
 
 ```powershell
-irm https://privacyai.example/pai/install.ps1 -OutFile $env:TEMP\pai-install.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\pai-install.ps1
+irm https://api.privacyai.example/pai/latest/install.ps1 -OutFile $env:TEMP\pai-install.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\pai-install.ps1
 ```
 
 The installer checks the signature on the release's checksums with the pai release key, checks the download against its SHA-256 checksum, and puts `pai` in `~/.local/bin` (Windows: `%LOCALAPPDATA%\pai`). If it warns that it can't check the signature, tell the user: the install used only the checksum. If it says the signature doesn't match, stop and tell the user. If `pai` isn't found afterwards, run it by its full path for the rest of these steps.
