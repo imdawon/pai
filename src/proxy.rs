@@ -91,7 +91,6 @@ struct Proxy {
     local_key: String,
     fingerprint: String,
     http: reqwest::Client,
-    credential: Mutex<Option<(u32, String)>>,
     /// The plan's streams and how many there are, so requests over the limit wait here in the
     /// order they came instead of coming back from the model API as 429s.
     streams: Mutex<Option<(usize, Arc<Semaphore>)>>,
@@ -212,7 +211,6 @@ pub fn run(env: Env) -> Result<()> {
             local_key,
             fingerprint,
             http,
-            credential: Mutex::new(None),
             streams: Mutex::new(None),
             learned_streams: Mutex::new(None),
             stop: Notify::new(),
@@ -412,20 +410,14 @@ async fn route(State(p): State<Arc<Proxy>>, req: Request) -> Response {
 
 impl Proxy {
     async fn credential(&self, refresh: bool) -> std::result::Result<String, Response> {
-        let now = self.env.clock.now();
-        let current = |c: &str| Credential::decode(c).is_ok_and(|c| c.day == period_now(c.plan, now));
-        if !refresh && let Some((_, c)) = self.credential.lock().unwrap().clone() && current(&c) {
-            return Ok(c);
-        }
+        // Read from pai's store on every request, not kept in memory: `pai status` and the daily
+        // collection replace a held pass when the account's adult content setting changes.
         let env = self.env.clone();
         let got = tokio::task::spawn_blocking(move || app::credential(&env, refresh))
             .await
             .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "api_error", "pai's proxy hit an internal error."))?;
         match got {
-            Ok(c) => {
-                *self.credential.lock().unwrap() = Some((0, c.clone()));
-                Ok(c)
-            }
+            Ok(c) => Ok(c),
             Err(e) => {
                 let status = match e {
                     Error::NotPaired | Error::DeviceRemoved => StatusCode::UNAUTHORIZED,

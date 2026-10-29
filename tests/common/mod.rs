@@ -26,20 +26,25 @@ pub fn today() -> u32 {
     day_number(now_unix())
 }
 
-/// RSA-2048 keygen is slow in debug builds, so every test shares the same two issuer keys.
-fn issuer_keys() -> &'static HashMap<(Plan, u32), IssuerKeyPair> {
-    static KEYS: OnceLock<HashMap<(Plan, u32), IssuerKeyPair>> = OnceLock::new();
+/// RSA-2048 keygen is slow in debug builds, so every test shares the same issuer keys: the Chat
+/// plan's for yesterday and today, and its adult twin's for both.
+fn issuer_keys() -> &'static HashMap<(Plan, u32, bool), IssuerKeyPair> {
+    static KEYS: OnceLock<HashMap<(Plan, u32, bool), IssuerKeyPair>> = OnceLock::new();
     KEYS.get_or_init(|| {
         let today = today();
-        [today - 1, today]
+        [(today - 1, false), (today, false), (today - 1, true), (today, true)]
             .into_iter()
-            .map(|day| ((Plan::Chat, day), pai_proto::generate_issuer_key().unwrap()))
+            .map(|(day, adult)| ((Plan::Chat, day, adult), pai_proto::generate_issuer_key().unwrap()))
             .collect()
     })
 }
 
 pub fn issuer_public_key(plan: Plan, day: u32) -> &'static pai_proto::IssuerPublicKey {
-    &issuer_keys()[&(plan, day)].pk
+    issuer_public_key_for(plan, day, false)
+}
+
+pub fn issuer_public_key_for(plan: Plan, day: u32, adult: bool) -> &'static pai_proto::IssuerPublicKey {
+    &issuer_keys()[&(plan, day, adult)].pk
 }
 
 #[derive(Default)]
@@ -49,6 +54,8 @@ pub struct State {
     pub next_device: u32,
     pub credential_plan: Option<Plan>,
     pub status: String,
+    /// The account's adult content setting, which the operator can change at any time.
+    pub adult: bool,
     pub issued: u32,
     pub requests: Vec<String>,
     pub seen_signatures: HashSet<Vec<u8>>,
@@ -222,14 +229,14 @@ fn handle(
                 delete_after_days: Some(365),
                 devices_used: s.devices.len() as u32,
                 device_limit: 5,
-                adult: false,
+                adult: s.adult,
                 beta: false,
             })
         }
         ("GET", "/v1/keys") => ok(IssuerKeys {
             keys: issuer_keys()
                 .iter()
-                .map(|((plan, day), kp)| IssuerKeyInfo::new(*plan, *day, &kp.pk).unwrap())
+                .map(|((plan, day, adult), kp)| IssuerKeyInfo::new_for(*plan, *adult, *day, &kp.pk).unwrap())
                 .collect(),
         }),
         ("POST", "/v1/credentials") => {
@@ -244,7 +251,10 @@ fn handle(
                     "the plan isn't paid",
                 );
             }
-            let Some(kp) = issuer_keys().get(&(req.plan, req.day)) else {
+            if req.adult != s.adult {
+                return error(StatusCode::FORBIDDEN, "wrong_key", "the adult setting doesn't match the account's");
+            }
+            let Some(kp) = issuer_keys().get(&(req.plan, req.day, req.adult)) else {
                 return error(StatusCode::BAD_REQUEST, "bad_day", "no key for that day");
             };
             if s.issued >= 3 {
