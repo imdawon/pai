@@ -128,6 +128,8 @@ There's no way to revoke a key. If the key leaks, change it as above. If every c
 
 **2026-10-27:** the key with ID `52856a9eb2b9d05b` was retired after its passphrase was pasted into a chat. pai 0.1.10 is the hand-over release to the key with ID `f0a52c411efb5295`.
 
+**2026-10-30:** `release/handover-key.pub` is back, so every release is signed with both keys again until every installed pai is on 0.1.10 or later. Publish with `PAI_SIGNING_KEY` set to the new key and `PAI_HANDOVER_KEY` set to the old one.
+
 ## Publisher identity: macOS
 
 The release binaries carry no publisher identity yet. Every arm64 binary must carry a signature to run at all; the Rust linker adds an ad-hoc one (`codesign -dv` shows `adhoc,linker-signed`), which is enough to run but not for Gatekeeper to trust a downloaded file.
