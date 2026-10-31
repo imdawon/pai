@@ -537,3 +537,34 @@ fn collecting_a_pass_drops_the_one_held_with_the_old_adult_setting() {
     assert_eq!(Credential::decode(&again).unwrap().day, today() - 1, "yesterday's, fetched again");
     assert!(!Credential::decode(&again).unwrap().adult);
 }
+
+#[test]
+fn a_plan_change_or_a_rotate_replaces_the_held_passes() {
+    use pai::keystore::NEXT_CREDENTIAL;
+    let relay = FakeRelay::start(CODE);
+    let mut t = paired(&relay);
+    // Yesterday's pass and today's collected ahead, as a computer holds them during a day.
+    t.env.clock = Clock::Fixed(now_unix() - 86_400);
+    let old = app::credential(&t.env, false).unwrap();
+    assert!(app::prefetch(&t.env, Plan::Chat, today(), std::time::Duration::ZERO).unwrap());
+    let ahead = t.env.keystore.get(NEXT_CREDENTIAL).unwrap().unwrap();
+    t.env.clock = Clock::System;
+    let hold = |t: &TestEnv| {
+        t.env.keystore.set(CREDENTIAL, &old).unwrap();
+        t.env.keystore.set(NEXT_CREDENTIAL, &ahead).unwrap();
+    };
+    let gone = |t: &TestEnv| t.env.keystore.get(CREDENTIAL).unwrap().is_none() && t.env.keystore.get(NEXT_CREDENTIAL).unwrap().is_none();
+
+    // The operator asks every client to rotate: both held passes go, and only once.
+    relay.state.lock().unwrap().rotate = 1_000;
+    assert!(app::status(&t.env).unwrap().adult_changed);
+    assert!(gone(&t));
+    hold(&t);
+    assert!(!app::status(&t.env).unwrap().adult_changed, "the same rotate time is acted on once");
+    assert!(!gone(&t));
+
+    // The account moves to another plan: the passes for the old plan go.
+    relay.state.lock().unwrap().credential_plan = Some(Plan::Agent);
+    assert!(app::status(&t.env).unwrap().adult_changed);
+    assert!(gone(&t));
+}
