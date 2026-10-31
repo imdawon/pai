@@ -9,3 +9,6 @@
   `release/handover-key.pub`.
 - Read `../privacy-ai/CLAUDE.md` before writing user-facing copy, and check design changes against
   `../privacy-ai/docs/THREAT-MODEL.md`.
+- When a change alters what `../privacy-ai/docs/HOW-IT-WORKS.html` shows (sign-up, day passes, pai, a
+  message's path, limits, what a machine sees or keeps), update that page in the same change and
+  republish it; see `../privacy-ai/CLAUDE.md`, "Keep the How DawonAI Works page up to date".
