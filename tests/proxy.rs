@@ -89,7 +89,7 @@ fn fake_gateway(seen: Arc<Mutex<Seen>>) -> (u16, String, String) {
                             let refusal = if stream { std::mem::take(&mut seen.lock().unwrap().refusal) } else { 0 };
                             if refusal > 0 {
                                 seen.lock().unwrap().requests.push((path.clone(), auth.clone(), false));
-                                let report = r#"{"text":"flagged!!","hour":1,"tag":"ab"}"#;
+                                let report = r#"{"parts":["flag","ged!!"],"hour":1,"tag":"ab"}"#;
                                 let (status, ctype, body) = if refusal == 1 {
                                     (400, "application/json", format!(r#"{{"type":"error","error":{{"type":"refused","message":"blocked"}},"dawonai_report":{report}}}"#))
                                 } else {
@@ -466,7 +466,7 @@ fn test_mode_needs_pins() {
     assert!(err.to_string().contains("pins"), "{err}");
 }
 
-// `dawonai report`: pai takes the flagged piece out of a refusal, keeps it, and sends it only when
+// `dawonai report`: pai takes the blocked text out of a refusal, keeps it, and sends it only when
 // the person types the command, which never reaches the model.
 #[test]
 fn reports_a_refusal_when_the_person_types_dawonai_report() {
@@ -484,7 +484,7 @@ fn reports_a_refusal_when_the_person_types_dawonai_report() {
     seen.lock().unwrap().refusal = 1;
     let (status, body) = p.send("/v1/messages", say("hello"));
     assert_eq!(status, 400);
-    assert!(body.contains("blocked") && !body.contains("dawonai_report") && !body.contains("flagged!!"), "{body}");
+    assert!(body.contains("blocked") && !body.contains("dawonai_report") && !body.contains("ged!!"), "{body}");
     assert!(seen.lock().unwrap().report_header.iter().all(|h| *h), "pai says it handles reports");
 
     let (status, body) = p.send("/v1/messages", serde_json::json!({"messages": [
@@ -497,7 +497,7 @@ fn reports_a_refusal_when_the_person_types_dawonai_report() {
         let s = seen.lock().unwrap();
         assert_eq!(s.reports.len(), 1);
         let sent: Value = serde_json::from_str(&s.reports[0]).unwrap();
-        assert_eq!(sent, serde_json::json!({"text": "flagged!!", "hour": 1, "tag": "ab"}));
+        assert_eq!(sent, serde_json::json!({"parts": ["flag", "ged!!"], "hour": 1, "tag": "ab"}));
         assert_eq!(s.requests.iter().filter(|r| r.0 == "/v1/messages").count(), 1, "only the refused request reached it");
     }
     // The same command again (a retry, a title request) gets the same answer, not a second report.

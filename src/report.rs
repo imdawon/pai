@@ -1,13 +1,14 @@
-//! `dawonai report`: sending DawonAI a piece of text its safety check refused, when the person
-//! thinks the refusal was wrong.
+//! `dawonai report`: sending DawonAI the text its safety check refused, when the person thinks the
+//! refusal was wrong.
 //!
-//! pai tells the model API it handles reports (`x-pai-report: 1`). A refusal then carries the one
-//! piece the classifier flagged, with a tag only the model server can make: in the error body
+//! pai tells the model API it handles reports (`x-pai-report: 1`). A refusal then carries the
+//! request's latest turn (the user and tool messages after the model's last answer, as `parts`),
+//! with a tag only the model server can make: in the error body
 //! (`dawonai_report`) or, when streamed, as an SSE comment (`: dawonai-report {...}`). pai takes it
 //! out before the coding harness sees the response and keeps the latest one in memory only.
 //!
 //! When the person's latest message is `dawonai report`, pai doesn't send that request to the
-//! model. It sends the kept piece to `/v1/safety/report` with the day pass and answers the harness
+//! model. It sends the kept text to `/v1/safety/report` with the day pass and answers the harness
 //! itself. Nothing is sent unless the person types it.
 
 use std::time::{Duration, Instant};
@@ -32,7 +33,8 @@ pub struct Held {
 
 impl Held {
     pub fn bytes(&self) -> usize {
-        self.payload.get("text").and_then(Value::as_str).map_or(0, str::len)
+        let parts = self.payload.get("parts").and_then(Value::as_array);
+        parts.map_or(0, |p| p.iter().filter_map(Value::as_str).map(str::len).sum())
     }
 }
 
@@ -195,9 +197,9 @@ mod tests {
 
     #[test]
     fn takes_the_report_out_of_an_error_body() {
-        let body = json!({"type": "error", "error": {"type": "refused", "message": "m"}, "dawonai_report": {"text": "t", "hour": 1, "tag": "a"}});
+        let body = json!({"type": "error", "error": {"type": "refused", "message": "m"}, "dawonai_report": {"parts": ["t"], "hour": 1, "tag": "a"}});
         let (rest, report) = take_from_body(body.to_string().as_bytes());
-        assert_eq!(report.unwrap()["text"], "t");
+        assert_eq!(report.unwrap()["parts"][0], "t");
         let rest: Value = serde_json::from_slice(&rest.unwrap()).unwrap();
         assert_eq!(rest, json!({"type": "error", "error": {"type": "refused", "message": "m"}}));
         assert_eq!(take_from_body(br#"{"error":{}}"#), (None, None));
@@ -205,7 +207,7 @@ mod tests {
 
     #[test]
     fn removes_the_comment_from_a_stream_however_it_is_split() {
-        let stream = b"event: message_start\ndata: {}\n\n: dawonai-report {\"text\":\"t\",\"hour\":1,\"tag\":\"a\"}\n\nevent: error\ndata: {\"x\":1}\n\n";
+        let stream = b"event: message_start\ndata: {}\n\n: dawonai-report {\"parts\":[\"t\"],\"hour\":1,\"tag\":\"a\"}\n\nevent: error\ndata: {\"x\":1}\n\n";
         let want = b"event: message_start\ndata: {}\n\nevent: error\ndata: {\"x\":1}\n\n";
         for size in [1, 3, 7, 40, stream.len()] {
             let mut f = SseFilter::default();
@@ -215,7 +217,7 @@ mod tests {
             }
             out.extend(f.finish());
             assert_eq!(String::from_utf8_lossy(&out), String::from_utf8_lossy(want), "chunks of {size}");
-            assert_eq!(f.report.as_ref().unwrap()["text"], "t", "chunks of {size}");
+            assert_eq!(f.report.as_ref().unwrap()["parts"][0], "t", "chunks of {size}");
         }
         let mut f = SseFilter::default();
         assert_eq!(f.push(b"data: plain\n\n"), b"data: plain\n\n");
