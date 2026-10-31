@@ -9,6 +9,10 @@
   `release/handover-key.pub`.
 - Read `../privacy-ai/CLAUDE.md` before writing user-facing copy, and check design changes against
   `../privacy-ai/docs/THREAT-MODEL.md`.
+- **Rerun the outside day pass tests** (RFC 9474 vector, Wycheproof, Cloudflare circl) on any change to
+  how pai collects, holds or checks passes, or to pai-proto: run `PAI_REQUIRE_CIRCL=1 cargo test -p pai-proto`
+  in `../pai-relay` (needs Go 1.25+) and paste the result into the PR. This repo has no CI for it. A
+  failure blocks the merge. See `../privacy-ai/CLAUDE.md`, "Rerun the outside day pass tests".
 - When a change alters what `../privacy-ai/docs/HOW-IT-WORKS.html` shows (sign-up, day passes, pai, a
   message's path, limits, what a machine sees or keeps), update that page in the same change and
   republish it. When a change alters what `../privacy-ai/docs/DAY-PASS-CRYPTO.html` shows (a key, a
