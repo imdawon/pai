@@ -27,14 +27,14 @@ pub fn today() -> u32 {
 }
 
 /// RSA-2048 keygen is slow in debug builds, so every test shares the same issuer keys: the Chat
-/// plan's for yesterday and today, and its adult twin's for both.
+/// plan's for yesterday and today, its adult twin's for both, and the Agent plan's for today.
 fn issuer_keys() -> &'static HashMap<(Plan, u32, bool), IssuerKeyPair> {
     static KEYS: OnceLock<HashMap<(Plan, u32, bool), IssuerKeyPair>> = OnceLock::new();
     KEYS.get_or_init(|| {
         let today = today();
-        [(today - 1, false), (today, false), (today - 1, true), (today, true)]
+        [(Plan::Chat, today - 1, false), (Plan::Chat, today, false), (Plan::Chat, today - 1, true), (Plan::Chat, today, true), (Plan::Agent, today, false)]
             .into_iter()
-            .map(|(day, adult)| ((Plan::Chat, day, adult), pai_proto::generate_issuer_key().unwrap()))
+            .map(|(plan, day, adult)| ((plan, day, adult), pai_proto::generate_issuer_key().unwrap()))
             .collect()
     })
 }
