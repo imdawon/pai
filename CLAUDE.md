@@ -11,4 +11,7 @@
   `../privacy-ai/docs/THREAT-MODEL.md`.
 - When a change alters what `../privacy-ai/docs/HOW-IT-WORKS.html` shows (sign-up, day passes, pai, a
   message's path, limits, what a machine sees or keeps), update that page in the same change and
-  republish it; see `../privacy-ai/CLAUDE.md`, "Keep the How DawonAI Works page up to date".
+  republish it. When a change alters what `../privacy-ai/docs/DAY-PASS-CRYPTO.html` shows (a key, a
+  derivation, a signed format, issuing or checking day passes, when passes are collected, a privacy
+  claim), update and republish that page too. See `../privacy-ai/CLAUDE.md`, "Keep the two explainer
+  pages up to date".
