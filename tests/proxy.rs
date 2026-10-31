@@ -37,6 +37,12 @@ struct Seen {
     fail_first: usize,
     /// The relay's grants time to name in `pai-grants` on every response.
     grants_header: Option<String>,
+    /// Refuse stream requests with a `dawonai report` piece: 1 in a 400 body, 2 in an SSE stream.
+    refusal: u8,
+    /// Bodies sent to `/v1/safety/report`.
+    reports: Vec<String>,
+    /// Whether each request said it handles reports (`x-pai-report: 1`).
+    report_header: Vec<bool>,
 }
 
 /// A fake model API over TLS with a self-signed certificate for `localhost`. It records each
@@ -72,6 +78,26 @@ fn fake_gateway(seen: Arc<Mutex<Seen>>) -> (u16, String, String) {
                             let path = req.uri().path().to_string();
                             let stream = matches!(path.as_str(), "/v1/chat/completions" | "/v1/messages" | "/v1/responses");
                             let auth = req.headers().get("authorization").map(|v| v.to_str().unwrap().to_string());
+                            seen.lock().unwrap().report_header.push(req.headers().get("x-pai-report").is_some_and(|v| v == "1"));
+                            if path == "/v1/safety/report" {
+                                use http_body_util::BodyExt;
+                                let body = req.into_body().collect().await.unwrap().to_bytes();
+                                seen.lock().unwrap().reports.push(String::from_utf8_lossy(&body).to_string());
+                                let ok = hyper::Response::builder().status(200).header("content-type", "application/json");
+                                return Ok::<_, Infallible>(ok.body(http_body_util::Full::new(bytes::Bytes::from(r#"{"received":true,"bytes":9}"#))).unwrap());
+                            }
+                            let refusal = if stream { std::mem::take(&mut seen.lock().unwrap().refusal) } else { 0 };
+                            if refusal > 0 {
+                                seen.lock().unwrap().requests.push((path.clone(), auth.clone(), false));
+                                let report = r#"{"text":"flagged!!","hour":1,"tag":"ab"}"#;
+                                let (status, ctype, body) = if refusal == 1 {
+                                    (400, "application/json", format!(r#"{{"type":"error","error":{{"type":"refused","message":"blocked"}},"dawonai_report":{report}}}"#))
+                                } else {
+                                    (200, "text/event-stream", format!("event: message_start\ndata: {{}}\n\n: dawonai-report {report}\n\nevent: error\ndata: {{\"type\":\"error\",\"error\":{{\"message\":\"blocked\"}}}}\n\n"))
+                                };
+                                let r = hyper::Response::builder().status(status).header("content-type", ctype);
+                                return Ok::<_, Infallible>(r.body(http_body_util::Full::new(bytes::Bytes::from(body))).unwrap());
+                            }
                             let (status, body, slow, announce, limit) = {
                                 let mut s = seen.lock().unwrap();
                                 s.requests.push((path, auth, req.headers().contains_key("x-api-key")));
@@ -147,6 +173,13 @@ impl Running {
         let r = req.send().unwrap();
         let status = r.status().as_u16();
         (status, r.json().unwrap_or(Value::Null))
+    }
+}
+
+impl Running {
+    fn send(&self, path: &str, body: Value) -> (u16, String) {
+        let r = self.http.post(format!("http://127.0.0.1:{}{path}", self.port)).header("x-api-key", &self.key).json(&body).send().unwrap();
+        (r.status().as_u16(), r.text().unwrap())
     }
 }
 
@@ -431,4 +464,53 @@ fn test_mode_needs_pins() {
     std::fs::write(&ca, "x").unwrap();
     let err = app::pair(&t.env, CODE, Some(&relay.url), None, None, None, Some((ca.as_path(), &[]))).unwrap_err();
     assert!(err.to_string().contains("pins"), "{err}");
+}
+
+// `dawonai report`: pai takes the flagged piece out of a refusal, keeps it, and sends it only when
+// the person types the command, which never reaches the model.
+#[test]
+fn reports_a_refusal_when_the_person_types_dawonai_report() {
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let (api_port, ca, pin) = fake_gateway(seen.clone());
+    let (p, _relay) = start(api_port, &ca, &pin);
+    let say = |text: &str| serde_json::json!({"max_tokens": 10, "messages": [{"role": "user", "content": text}]});
+
+    let (status, body) = p.send("/v1/messages", say("dawonai report"));
+    assert_eq!(status, 400);
+    assert!(body.contains("report_unavailable"), "nothing to report yet: {body}");
+    assert!(seen.lock().unwrap().requests.is_empty(), "the command never reaches the model API");
+
+    // A refusal in a 400 body: the harness gets it without the piece.
+    seen.lock().unwrap().refusal = 1;
+    let (status, body) = p.send("/v1/messages", say("hello"));
+    assert_eq!(status, 400);
+    assert!(body.contains("blocked") && !body.contains("dawonai_report") && !body.contains("flagged!!"), "{body}");
+    assert!(seen.lock().unwrap().report_header.iter().all(|h| *h), "pai says it handles reports");
+
+    let (status, body) = p.send("/v1/messages", serde_json::json!({"messages": [
+        {"role": "user", "content": "hello"},
+        {"role": "user", "content": [{"type": "text", "text": "<system-reminder>r</system-reminder>"}, {"type": "text", "text": "dawonai report"}]},
+    ]}));
+    assert_eq!(status, 400);
+    assert!(body.contains("report_sent") && body.contains("9 bytes"), "{body}");
+    {
+        let s = seen.lock().unwrap();
+        assert_eq!(s.reports.len(), 1);
+        let sent: Value = serde_json::from_str(&s.reports[0]).unwrap();
+        assert_eq!(sent, serde_json::json!({"text": "flagged!!", "hour": 1, "tag": "ab"}));
+        assert_eq!(s.requests.iter().filter(|r| r.0 == "/v1/messages").count(), 1, "only the refused request reached it");
+    }
+    // The same command again (a retry, a title request) gets the same answer, not a second report.
+    let (_, body) = p.send("/v1/messages", say("dawonai report"));
+    assert!(body.contains("report_sent"));
+    assert_eq!(seen.lock().unwrap().reports.len(), 1);
+
+    // A streamed refusal: the comment is taken out of the stream.
+    seen.lock().unwrap().refusal = 2;
+    let (status, body) = p.send("/v1/chat/completions", say("hello"));
+    assert_eq!(status, 200);
+    assert!(body.contains("blocked") && !body.contains("dawonai-report"), "{body}");
+    let (_, body) = p.send("/v1/responses", serde_json::json!({"input": "dawonai report"}));
+    assert!(body.contains("report_sent"));
+    assert_eq!(seen.lock().unwrap().reports.len(), 2);
 }

@@ -1548,7 +1548,7 @@ dependencies = [
 
 [[package]]
 name = "pai"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "axum",
  "base64 0.23.1",

@@ -21,6 +21,7 @@ use crate::app::{self, Env};
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::pin;
+use crate::report;
 
 pub const DEFAULT_PORT: u16 = 47821;
 const MAX_BODY: usize = 32 * 1024 * 1024;
@@ -107,6 +108,8 @@ struct Proxy {
     handover: Mutex<Option<Handover>>,
     /// The grants time last checked against (`pai-grants`), and whether a check is waiting to run.
     grants: Mutex<(Option<i64>, bool)>,
+    /// The latest refusal's flagged piece, for `dawonai report`. In memory only.
+    report: Mutex<Option<report::Held>>,
 }
 
 /// The listening socket a proxy hands to the updated `pai` that replaces it, so connections that
@@ -222,6 +225,7 @@ pub fn run(env: Env) -> Result<()> {
             update_poke: Notify::new(),
             handover: Mutex::new(handover),
             grants: Mutex::new((app::checked_grants(&env_for_grants), false)),
+            report: Mutex::new(None),
         });
         if proxy.env.prefetch {
             tokio::spawn(prefetch_loop(proxy.env.clone()));
@@ -604,12 +608,17 @@ async fn forward(p: Arc<Proxy>, req: Request) -> Response {
         Ok(b) => b,
         Err(_) => return error(StatusCode::PAYLOAD_TOO_LARGE, "request_too_large", "The request is larger than 32 MB."),
     };
+    // The person typed `dawonai report`: this request never goes to the model.
+    if parts.method == Method::POST && report::is_report_request(&body) {
+        return hold(send_report(&p).await, slot);
+    }
     let mut headers = HeaderMap::new();
     for (name, value) in &parts.headers {
         if forwardable(name) {
             headers.append(name.clone(), value.clone());
         }
     }
+    headers.insert(report::HEADER, HeaderValue::from_static("1"));
     let path = parts.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
     let url = format!("{}{path}", p.api);
 
@@ -647,8 +656,35 @@ async fn forward(p: Arc<Proxy>, req: Request) -> Response {
         let transient = matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504);
         let may_retry = (status == StatusCode::UNAUTHORIZED && !refreshed) || (transient && attempts < RETRIES);
         if !may_retry {
-            let stream = resp.bytes_stream().map_err(std::io::Error::other);
-            return hold(respond(status, &resp_headers, Body::from_stream(stream)), slot);
+            // A refusal carries its flagged piece for `dawonai report`; the harness never sees it.
+            if status == StatusCode::BAD_REQUEST {
+                let text = resp.bytes().await.unwrap_or_default();
+                let (stripped, held) = report::take_from_body(&text);
+                if let Some(payload) = held {
+                    *p.report.lock().unwrap() = Some(report::Held { payload, sent: None });
+                }
+                let body = stripped.map_or_else(|| Body::from(text), Body::from);
+                let mut headers = resp_headers.clone();
+                headers.remove(header::CONTENT_LENGTH);
+                return hold(respond(status, &headers, body), slot);
+            }
+            let filter = Arc::new(Mutex::new(report::SseFilter::default()));
+            let (keep, last) = (p.clone(), filter.clone());
+            let stream = resp
+                .bytes_stream()
+                .map_err(std::io::Error::other)
+                .map_ok(move |chunk| {
+                    let mut f = filter.lock().unwrap();
+                    let out = Bytes::from(f.push(&chunk));
+                    if let Some(payload) = f.report.take() {
+                        *keep.report.lock().unwrap() = Some(report::Held { payload, sent: None });
+                    }
+                    out
+                })
+                .chain(futures_util::stream::once(async move { Ok(Bytes::from(last.lock().unwrap().finish())) }));
+            let mut headers = resp_headers.clone();
+            headers.remove(header::CONTENT_LENGTH);
+            return hold(respond(status, &headers, Body::from_stream(stream)), slot);
         }
         let text = resp.bytes().await.unwrap_or_default();
         let kind = String::from_utf8_lossy(&text);
@@ -665,6 +701,49 @@ async fn forward(p: Arc<Proxy>, req: Request) -> Response {
         }
         tokio::time::sleep(retry_after(&resp_headers).max(backoff(attempts, first))).await;
         attempts += 1;
+    }
+}
+
+/// Answers `dawonai report`: sends the latest refusal's flagged piece to the model API with the
+/// day pass, and tells the harness so in an error, the way it showed the refusal.
+async fn send_report(p: &Arc<Proxy>) -> Response {
+    let held = p.report.lock().unwrap().clone();
+    let Some(held) = held else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "report_unavailable",
+            "pai has no blocked request to report. It keeps only the most recent one, until pai restarts. This message wasn't sent to the model.",
+        );
+    };
+    let sent = |n: usize| {
+        error(
+            StatusCode::BAD_REQUEST,
+            "report_sent",
+            format!("Sent the blocked text ({n} bytes) to DawonAI. Thank you: we'll review it to improve the classifier. This message wasn't sent to the model."),
+        )
+    };
+    if held.sent.is_some_and(|at| at.elapsed() < report::SENT_ANSWER_FOR) {
+        return sent(held.bytes());
+    }
+    let credential = match p.credential(false).await {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    let url = format!("{}/v1/safety/report", p.api);
+    match p.http.post(&url).bearer_auth(&credential).json(&held.payload).send().await {
+        Ok(r) if r.status().is_success() => {
+            if let Some(h) = p.report.lock().unwrap().as_mut() {
+                h.sent = Some(std::time::Instant::now());
+            }
+            sent(held.bytes())
+        }
+        Ok(r) => {
+            let status = r.status();
+            let v: serde_json::Value = r.json().await.unwrap_or_default();
+            let message = v.pointer("/error/message").and_then(|m| m.as_str()).unwrap_or("The model API didn't take the report.");
+            error(status, "report_failed", format!("{message} This message wasn't sent to the model."))
+        }
+        Err(e) => unreachable(&p.api, &e),
     }
 }
 
