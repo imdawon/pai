@@ -56,6 +56,8 @@ pub struct State {
     pub status: String,
     /// The account's adult content setting, which the operator can change at any time.
     pub adult: bool,
+    /// The relay-wide rotate time (`pai-relay rotate`).
+    pub rotate: i64,
     pub issued: u32,
     pub requests: Vec<String>,
     pub seen_signatures: HashSet<Vec<u8>>,
@@ -231,6 +233,7 @@ fn handle(
                 device_limit: 5,
                 adult: s.adult,
                 beta: false,
+                rotate: s.rotate,
             })
         }
         ("GET", "/v1/keys") => ok(IssuerKeys {

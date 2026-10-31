@@ -305,20 +305,39 @@ fn cached_credential(env: &Env) -> Result<Option<String>> {
     stored_credential(env, CREDENTIAL, 0)
 }
 
-/// The account's adult content setting is inside each day pass, fixed when the pass is issued.
-/// When the setting has changed since, drops the held passes (today's and tomorrow's) that carry
-/// the old one, so the next request collects a pass with the new one. Only called when pai has
-/// fetched the account anyway, so it adds no request to the relay. Returns whether any was dropped.
-fn drop_passes_with_old_adult_setting(env: &Env, adult: bool) -> Result<bool> {
+/// A day pass carries the account's plan and adult content setting, fixed when it's issued. Drops
+/// the held passes (today's and tomorrow's) that no longer match the account, and every held pass
+/// when the operator has asked all clients to replace theirs since this computer last looked
+/// (`rotate`). The next request then collects a new one. Only called when pai has fetched the
+/// account anyway, so it adds no request to the relay. Returns whether any was dropped.
+fn drop_stale_passes(env: &Env, account: &pai_proto::AccountView) -> Result<bool> {
+    let rotate = account.rotate > checked_rotate(env).unwrap_or(0);
     let mut dropped = false;
     for name in [CREDENTIAL, NEXT_CREDENTIAL] {
         let Some(stored) = env.keystore.get(name)? else { continue };
-        if pai_proto::Credential::decode(&stored).is_ok_and(|c| c.adult != adult) {
+        let stale = rotate
+            || pai_proto::Credential::decode(&stored)
+                .is_ok_and(|c| c.adult != account.adult || account.credential_plan.is_some_and(|p| p != c.plan));
+        if stale {
             env.keystore.delete(name)?;
             dropped = true;
         }
     }
+    if rotate {
+        fs::create_dir_all(&env.paths.config_dir).map_err(|e| io_err("create", &env.paths.config_dir, e))?;
+        let path = rotate_file(env);
+        fs::write(&path, format!("{}\n", account.rotate)).map_err(|e| io_err("write", &path, e))?;
+    }
     Ok(dropped)
+}
+
+/// Where pai keeps the last rotate time it acted on.
+fn rotate_file(env: &Env) -> PathBuf {
+    env.paths.config_dir.join("rotate-checked")
+}
+
+fn checked_rotate(env: &Env) -> Option<i64> {
+    fs::read_to_string(rotate_file(env)).ok()?.trim().parse().ok()
 }
 
 /// Where pai keeps the relay's grants time it last checked its account against (`pai-grants`).
@@ -332,15 +351,16 @@ pub fn checked_grants(env: &Env) -> Option<i64> {
 }
 
 /// The model API announced a new grants time (`pai-grants`): what some account's credentials allow
-/// changed. Asks the relay for this account; if its adult content setting no longer matches the
-/// held passes, drops them and collects today's again at once. Every pai does this when the time
+/// changed. Asks the relay for this account; if its plan or adult content setting no longer matches
+/// the held passes, or the operator asked every client to rotate, drops them and collects today's
+/// again at once. Every pai does this when the time
 /// changes, so the relay can't tell whose setting changed. Returns whether the passes were replaced.
 pub fn recheck_grants(env: &Env, grants: i64) -> Result<bool> {
     let config = env.paired()?;
     let key = env.device_key()?;
     let _lock = lock(env)?;
     let account = env.relay(&config, env.relay_timeout)?.account(&key, &config.device_id)?;
-    let dropped = drop_passes_with_old_adult_setting(env, account.adult)?;
+    let dropped = drop_stale_passes(env, &account)?;
     if dropped && account.credential_plan.is_some() && account.status != "banned" {
         // Collected now rather than with the next request, so the relay doesn't see it at the
         // moment of use. If this fails, the next request collects it.
@@ -653,8 +673,8 @@ fn fetch_credential(env: &Env, config: &Config, offset: u32) -> Result<(String, 
     let day = period_now(plan, env.clock.now()) + offset;
     // Adult accounts' credentials come from the adult keys, so the model server allows erotica.
     let adult = account.adult;
-    // Callers hold the lock. A held pass with the old setting would otherwise last its period.
-    drop_passes_with_old_adult_setting(env, adult)?;
+    // Callers hold the lock. A held pass with an old plan or setting would otherwise last its period.
+    drop_stale_passes(env, &account)?;
 
     let keys = relay.keys()?;
     let info = keys
@@ -804,10 +824,11 @@ pub fn status(env: &Env) -> Result<Status> {
             .and_then(|r| r.account(&key, &cfg.device_id))
         {
             Ok(a) => {
-                // Adult content was turned on or off for the account since the held passes were
-                // collected: drop them, so the next request gets one with the new setting.
+                // The account's plan or adult content setting changed since the held passes were
+                // collected, or the operator asked for new ones: drop them, so the next request
+                // gets a current one.
                 if let Ok(_lock) = lock(env)
-                    && drop_passes_with_old_adult_setting(env, a.adult).unwrap_or(false)
+                    && drop_stale_passes(env, &a).unwrap_or(false)
                 {
                     adult_changed = true;
                     credential_today = false;
@@ -921,7 +942,7 @@ impl Status {
             }
         )?;
         if self.adult_changed {
-            writeln!(f, "            The held ones were dropped: adult content was turned on or off for this account after they were collected.")?;
+            writeln!(f, "            The held ones were dropped: the account's plan or adult content setting changed after they were collected, or DawonAI asked every device for new ones.")?;
         }
         writeln!(f, "Relay:      {}", c.relay_url)?;
         writeln!(f, "API:        {}", c.api_url)?;
