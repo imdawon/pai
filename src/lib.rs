@@ -9,6 +9,7 @@ pub mod keystore;
 pub mod pin;
 pub mod proxy;
 pub mod relay;
+pub mod report;
 pub mod service;
 pub mod setup;
 pub mod update;
