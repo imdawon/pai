@@ -305,12 +305,12 @@ fn holds_requests_over_the_plans_stream_limit() {
     let (api_port, ca, pin) = fake_gateway(seen.clone());
     let (p, _relay) = start(api_port, &ca, &pin);
 
-    // The fake relay issues Chat passes, and this API names no limit, so pai uses its own: 3.
-    let statuses = send_at_once(&p, 5);
-    assert_eq!(statuses, [200; 5]);
+    // The fake relay issues Chat passes, and this API names no limit, so pai uses its own: 1.
+    let statuses = send_at_once(&p, 3);
+    assert_eq!(statuses, [200; 3]);
     let s = seen.lock().unwrap();
-    assert_eq!(s.requests.len(), 5, "each request is sent once");
-    assert_eq!(s.most_open, 3, "never more than the plan's 3 streams at a time");
+    assert_eq!(s.requests.len(), 3, "each request is sent once");
+    assert_eq!(s.most_open, 1, "never more than the plan's 1 stream at a time");
 }
 
 #[test]
