@@ -495,16 +495,17 @@ fn turning_adult_content_on_replaces_the_held_passes() {
     assert!(!Credential::decode(&ahead).unwrap().adult);
     assert_eq!(relay.issued(), 2);
 
-    // The operator turns adult content on. `pai status` sees it and drops the held passes.
+    // The operator turns adult content on. `pai status` sees it, collects today's pass with the
+    // adult bit, and only then drops the held ones.
     relay.state.lock().unwrap().adult = true;
     t.env.clock = Clock::System;
     let status = app::status(&t.env).unwrap();
-    assert!(status.adult_changed && !status.credential_today && !status.credential_tomorrow);
-    assert!(status.to_string().contains("adult content was turned on or off"), "{status}");
-    assert!(t.env.keystore.get(CREDENTIAL).unwrap().is_none());
+    assert!(status.adult_changed && status.credential_today && !status.credential_tomorrow);
+    assert!(status.to_string().contains("adult content setting changed"), "{status}");
     assert!(t.env.keystore.get(NEXT_CREDENTIAL).unwrap().is_none());
+    assert_eq!(relay.issued(), 3);
 
-    // The next request collects today's pass with the adult bit.
+    // The next request uses it.
     let token = app::credential(&t.env, false).unwrap();
     let cred = Credential::decode(&token).unwrap();
     assert!(cred.adult && cred.day == today());
@@ -553,18 +554,32 @@ fn a_plan_change_or_a_rotate_replaces_the_held_passes() {
         t.env.keystore.set(CREDENTIAL, &old).unwrap();
         t.env.keystore.set(NEXT_CREDENTIAL, &ahead).unwrap();
     };
-    let gone = |t: &TestEnv| t.env.keystore.get(CREDENTIAL).unwrap().is_none() && t.env.keystore.get(NEXT_CREDENTIAL).unwrap().is_none();
+    let today_pass = |t: &TestEnv| t.env.keystore.get(CREDENTIAL).unwrap().map(|c| Credential::decode(&c).unwrap());
+    let held_as_before = |t: &TestEnv| {
+        t.env.keystore.get(CREDENTIAL).unwrap().is_some_and(|c| c.as_str() == old.as_str())
+            && t.env.keystore.get(NEXT_CREDENTIAL).unwrap().is_some_and(|c| c.as_str() == ahead.as_str())
+    };
 
-    // The operator asks every client to rotate: both held passes go, and only once.
+    // A rotate the device can't act on yet (no issuances left): the held passes stay.
     relay.state.lock().unwrap().rotate = 1_000;
-    assert!(app::status(&t.env).unwrap().adult_changed);
-    assert!(gone(&t));
-    hold(&t);
-    assert!(!app::status(&t.env).unwrap().adult_changed, "the same rotate time is acted on once");
-    assert!(!gone(&t));
+    relay.state.lock().unwrap().issued = 3;
+    assert!(!app::status(&t.env).unwrap().adult_changed);
+    assert!(held_as_before(&t), "a failed collection keeps the old passes");
 
-    // The account moves to another plan: the passes for the old plan go.
+    // Once it can: a new pass for today first, then the held ones go.
+    relay.state.lock().unwrap().issued = 0;
+    assert!(app::status(&t.env).unwrap().adult_changed);
+    assert!(today_pass(&t).is_some_and(|c| c.day == today() && c.plan == Plan::Chat));
+    assert!(t.env.keystore.get(NEXT_CREDENTIAL).unwrap().is_none());
+
+    // The same rotate time is acted on once.
+    hold(&t);
+    assert!(!app::status(&t.env).unwrap().adult_changed);
+    assert!(held_as_before(&t));
+
+    // The account moves to another plan: a pass for the new plan replaces the old ones.
     relay.state.lock().unwrap().credential_plan = Some(Plan::Agent);
     assert!(app::status(&t.env).unwrap().adult_changed);
-    assert!(gone(&t));
+    assert!(today_pass(&t).is_some_and(|c| c.plan == Plan::Agent));
+    assert!(t.env.keystore.get(NEXT_CREDENTIAL).unwrap().is_none());
 }

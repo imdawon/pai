@@ -305,30 +305,56 @@ fn cached_credential(env: &Env) -> Result<Option<String>> {
     stored_credential(env, CREDENTIAL, 0)
 }
 
-/// A day pass carries the account's plan and adult content setting, fixed when it's issued. Drops
-/// the held passes (today's and tomorrow's) that no longer match the account, and every held pass
-/// when the operator has asked all clients to replace theirs since this computer last looked
-/// (`rotate`). The next request then collects a new one. Only called when pai has fetched the
-/// account anyway, so it adds no request to the relay. Returns whether any was dropped.
-fn drop_stale_passes(env: &Env, account: &pai_proto::AccountView) -> Result<bool> {
+/// A day pass carries the account's plan and adult content setting, fixed when it's issued. A held
+/// pass is stale when either no longer matches the account, and every held pass is stale when the
+/// operator has asked all clients to replace theirs since this computer last looked (`rotate`).
+fn stale_passes(env: &Env, account: &pai_proto::AccountView) -> Result<Vec<&'static str>> {
     let rotate = account.rotate > checked_rotate(env).unwrap_or(0);
-    let mut dropped = false;
+    let mut stale = vec![];
     for name in [CREDENTIAL, NEXT_CREDENTIAL] {
         let Some(stored) = env.keystore.get(name)? else { continue };
-        let stale = rotate
+        if rotate
             || pai_proto::Credential::decode(&stored)
-                .is_ok_and(|c| c.adult != account.adult || account.credential_plan.is_some_and(|p| p != c.plan));
-        if stale {
-            env.keystore.delete(name)?;
-            dropped = true;
+                .is_ok_and(|c| c.adult != account.adult || account.credential_plan.is_some_and(|p| p != c.plan))
+        {
+            stale.push(name);
         }
     }
-    if rotate {
+    Ok(stale)
+}
+
+/// Drops the stale held passes (today's and tomorrow's) and notes the rotate time as acted on.
+/// Called only once a new pass has arrived, or when the account can't get one anyway, so a failed
+/// fetch never leaves this computer without the pass it had. Returns whether any was dropped.
+fn drop_stale_passes(env: &Env, account: &pai_proto::AccountView) -> Result<bool> {
+    let stale = stale_passes(env, account)?;
+    for name in &stale {
+        env.keystore.delete(name)?;
+    }
+    if account.rotate > checked_rotate(env).unwrap_or(0) {
         fs::create_dir_all(&env.paths.config_dir).map_err(|e| io_err("create", &env.paths.config_dir, e))?;
         let path = rotate_file(env);
         fs::write(&path, format!("{}\n", account.rotate)).map_err(|e| io_err("write", &path, e))?;
     }
-    Ok(dropped)
+    Ok(!stale.is_empty())
+}
+
+/// Replaces stale held passes: collects today's new pass first, and drops the old ones only once
+/// it has arrived. If the collection fails, the old passes stay and keep working until the next
+/// try. Callers hold the lock. Returns whether any pass was replaced or dropped.
+fn replace_stale_passes(env: &Env, config: &Config, account: &pai_proto::AccountView) -> Result<bool> {
+    if stale_passes(env, account)?.is_empty() {
+        drop_stale_passes(env, account)?;
+        return Ok(false);
+    }
+    if account.credential_plan.is_some() && account.status != "banned" {
+        // fetch_credential drops the stale passes once the new one has arrived.
+        let (encoded, _) = fetch_credential(env, config, 0)?;
+        env.keystore.set(CREDENTIAL, &encoded)?;
+    } else {
+        drop_stale_passes(env, account)?;
+    }
+    Ok(true)
 }
 
 /// Where pai keeps the last rotate time it acted on.
@@ -360,14 +386,15 @@ pub fn recheck_grants(env: &Env, grants: i64) -> Result<bool> {
     let key = env.device_key()?;
     let _lock = lock(env)?;
     let account = env.relay(&config, env.relay_timeout)?.account(&key, &config.device_id)?;
-    let dropped = drop_stale_passes(env, &account)?;
-    if dropped && account.credential_plan.is_some() && account.status != "banned" {
-        // Collected now rather than with the next request, so the relay doesn't see it at the
-        // moment of use. If this fails, the next request collects it.
-        if let Ok((encoded, _)) = fetch_credential(env, &config, 0) {
-            env.keystore.set(CREDENTIAL, &encoded)?;
-        }
-    }
+    // Collected now rather than with the next request, so the relay doesn't see it at the moment
+    // of use. Any other failure leaves the grants time unchecked, so the next response tries again
+    // with the old passes still held; the device's issuances for today being used up won't change
+    // today, so that one is final.
+    let dropped = match replace_stale_passes(env, &config, &account) {
+        Ok(d) => d,
+        Err(Error::IssuanceLimit { .. }) => false,
+        Err(e) => return Err(e),
+    };
     let path = grants_file(env);
     fs::create_dir_all(&env.paths.config_dir).map_err(|e| io_err("create", &env.paths.config_dir, e))?;
     fs::write(&path, format!("{grants}\n")).map_err(|e| io_err("write", &path, e))?;
@@ -673,9 +700,6 @@ fn fetch_credential(env: &Env, config: &Config, offset: u32) -> Result<(String, 
     let day = period_now(plan, env.clock.now()) + offset;
     // Adult accounts' credentials come from the adult keys, so the model server allows erotica.
     let adult = account.adult;
-    // Callers hold the lock. A held pass with an old plan or setting would otherwise last its period.
-    drop_stale_passes(env, &account)?;
-
     let keys = relay.keys()?;
     let info = keys
         .keys
@@ -707,6 +731,9 @@ fn fetch_credential(env: &Env, config: &Config, offset: u32) -> Result<(String, 
     credential
         .verify(&issuer)
         .map_err(|_| Error::BadIssuerResponse("the signature doesn't verify".into()))?;
+    // Callers hold the lock. Now that a new pass is here, held ones with an old plan or setting go;
+    // they would otherwise last their period.
+    drop_stale_passes(env, &account)?;
     Ok((credential.encode(), day))
 }
 
@@ -825,14 +852,14 @@ pub fn status(env: &Env) -> Result<Status> {
         {
             Ok(a) => {
                 // The account's plan or adult content setting changed since the held passes were
-                // collected, or the operator asked for new ones: drop them, so the next request
-                // gets a current one.
+                // collected, or the operator asked for new ones: replace them, keeping the old
+                // ones if a new one can't be collected now.
                 if let Ok(_lock) = lock(env)
-                    && drop_stale_passes(env, &a).unwrap_or(false)
+                    && replace_stale_passes(env, &cfg, &a).unwrap_or(false)
                 {
                     adult_changed = true;
-                    credential_today = false;
-                    credential_tomorrow = false;
+                    credential_today = cached_credential(env).ok().flatten().is_some();
+                    credential_tomorrow = stored_credential(env, NEXT_CREDENTIAL, 1).ok().flatten().is_some();
                 }
                 paid = Some(a.plan.is_some() && a.credential_plan.is_some());
                 match (&a.plan, a.credential_plan) {
