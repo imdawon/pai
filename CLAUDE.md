@@ -7,6 +7,7 @@
   servers first. See `../privacy-ai/CLAUDE.md`, "Every pai update answers two questions".
 - Releases are signed with both release keys until every install is on 0.1.10 or later; keep
   `release/handover-key.pub`.
+- **Stay compatible with every major harness and with the OpenAI and Anthropic APIs.** What pai's local proxy sends a harness, its own errors included, must look like what that API sends. Act on the gateway's `dawonai_error`, never on OpenAI's or Anthropic's labels. See `../privacy-ai/CLAUDE.md`, "Stay compatible with every major harness and with both APIs".
 - Read `../privacy-ai/CLAUDE.md` before writing user-facing copy, and check design changes against
   `../privacy-ai/docs/THREAT-MODEL.md`.
 - **Rerun the outside day pass tests** (RFC 9474 vector, Wycheproof, Cloudflare circl) on any change to
