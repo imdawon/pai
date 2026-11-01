@@ -351,11 +351,50 @@ async fn prefetch_loop(env: Env) {
     }
 }
 
+/// An error pai makes itself. It's sent in the Anthropic API's shape; `handle` reshapes it for a
+/// tool that called an OpenAI endpoint (`openai_error`).
+#[derive(Clone)]
+struct PaiError {
+    kind: String,
+    message: String,
+}
+
+/// pai's own name for an error, beside `error`, as the gateway sends `dawonai_error`.
+const KIND_FIELD: &str = "dawonai_error";
+
 fn error(status: StatusCode, kind: &str, message: impl Into<String>) -> Response {
-    // Both shapes at once: Anthropic clients read error.type and error.message under a top-level
-    // "type": "error"; OpenAI clients read error.message.
-    let body = json!({"type": "error", "error": {"type": kind, "message": message.into()}});
+    let message = message.into();
+    let class = match status.as_u16() {
+        401 => "authentication_error",
+        403 => "permission_error",
+        404 => "not_found_error",
+        413 => "request_too_large",
+        429 => "rate_limit_error",
+        400..=499 => "invalid_request_error",
+        _ => "api_error",
+    };
+    let body = json!({"type": "error", "error": {"type": class, "message": message}, KIND_FIELD: kind});
+    let mut resp = (status, [(header::CONTENT_TYPE, "application/json")], body.to_string()).into_response();
+    resp.extensions_mut().insert(PaiError { kind: kind.to_string(), message });
+    resp
+}
+
+/// The same error in the OpenAI API's shape: its class in `type`, its case in `code`.
+fn openai_error(status: StatusCode, e: &PaiError) -> Response {
+    let (class, code) = match status.as_u16() {
+        401 => ("invalid_request_error", Some("invalid_api_key")),
+        404 => ("invalid_request_error", Some("unknown_url")),
+        429 => ("requests", Some("rate_limit_exceeded")),
+        400..=499 => ("invalid_request_error", None),
+        _ => ("server_error", None),
+    };
+    let body = json!({"error": {"message": e.message, "type": class, "param": null, "code": code}, KIND_FIELD: e.kind});
     (status, [(header::CONTENT_TYPE, "application/json")], body.to_string()).into_response()
+}
+
+/// Whether the tool called the Anthropic API (`/v1/messages`) rather than an OpenAI one.
+fn anthropic_api(req: &Request) -> bool {
+    req.uri().path().starts_with("/v1/messages") || req.headers().contains_key("anthropic-version")
 }
 
 fn presented_key(headers: &HeaderMap) -> Option<&str> {
@@ -372,7 +411,18 @@ fn same(a: &str, b: &str) -> bool {
 }
 
 async fn handle(state: State<Arc<Proxy>>, req: Request) -> Response {
+    let anthropic = anthropic_api(&req);
     let mut resp = route(state, req).await;
+    if !anthropic && let Some(e) = resp.extensions().get::<PaiError>().cloned() {
+        let headers = std::mem::take(resp.headers_mut());
+        let status = resp.status();
+        resp = openai_error(status, &e);
+        for (name, value) in &headers {
+            if name != header::CONTENT_LENGTH && name != header::CONTENT_TYPE {
+                resp.headers_mut().insert(name.clone(), value.clone());
+            }
+        }
+    }
     // One request per connection, so a coding tool never sends on a kept-open connection that a
     // restarting proxy is closing. A new connection to 127.0.0.1 costs next to nothing.
     resp.headers_mut().insert(header::CONNECTION, HeaderValue::from_static("close"));
@@ -653,7 +703,7 @@ async fn forward(p: Arc<Proxy>, req: Request) -> Response {
         note_stream_limit(&p, resp.headers(), &credential);
         let status = resp.status();
         let resp_headers = resp.headers().clone();
-        let transient = matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504);
+        let transient = matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504 | 529);
         let may_retry = (status == StatusCode::UNAUTHORIZED && !refreshed) || (transient && attempts < RETRIES);
         if !may_retry {
             // A refusal carries its flagged piece for `dawonai report`; the harness never sees it.

@@ -315,6 +315,16 @@ fn refuses_web_pages_other_hosts_and_wrong_keys() {
     assert_eq!(p.post("/v1/chat/completions", Some(&p.key), &[("origin", "https://evil.example")]).0, 403);
     assert_eq!(p.post("/v1/chat/completions", Some(&p.key), &[("host", "evil.example")]).0, 403);
     assert_eq!(p.post("/admin", Some(&p.key), &[]).0, 404);
+
+    // pai's own errors come in the shape of the API the tool called.
+    let (_, body) = p.post("/v1/chat/completions", Some("pai-local-wrong"), &[]);
+    assert_eq!(body["error"]["type"], "invalid_request_error", "{body}");
+    assert_eq!(body["error"]["code"], "invalid_api_key");
+    assert_eq!(body["error"]["param"], Value::Null);
+    assert_eq!(body["dawonai_error"], "authentication_error");
+    assert!(body.get("type").is_none(), "no Anthropic wrapper on an OpenAI endpoint: {body}");
+    let (_, body) = p.post("/v1/messages", Some("pai-local-wrong"), &[]);
+    assert_eq!((body["type"].as_str(), body["error"]["type"].as_str()), (Some("error"), Some("authentication_error")));
     assert!(seen.lock().unwrap().requests.is_empty());
 }
 
