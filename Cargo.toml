@@ -4,6 +4,7 @@ version = "0.1.12"
 edition = "2024"
 description = "Gives coding tools a DawonAI day credential without a long-lived API key"
 license = "MIT"
+authors = ["Dawon Science and Technology Laboratories LLC"]
 
 [dependencies]
 pai-proto = { path = "../pai-relay/crates/pai-proto" }
