@@ -144,4 +144,4 @@ cargo test --features test-mode
 PAI_TEST_RELAY=http://127.0.0.1:8787 cargo test --test real_relay -- --ignored
 ```
 
-pai is part of DawonAI, a service of Dawon Science and Technology Laboratories LLC, an Idaho company.
+pai is part of DawonAI, a service of Dawon Science and Technology Laboratories LLC.
