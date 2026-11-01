@@ -18,7 +18,7 @@ const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (staging build, with 
 #[command(
     name = "pai",
     version = VERSION,
-    after_help = "pai is part of DawonAI, a service of Dawon Science and Technology Laboratories LLC, an Idaho company."
+    after_help = "pai is part of DawonAI, a service of Dawon Science and Technology Laboratories LLC."
 )]
 struct Cli {
     #[command(subcommand)]
