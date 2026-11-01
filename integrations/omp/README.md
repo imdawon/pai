@@ -4,7 +4,7 @@ An [oh-my-pi](https://github.com/can1357/oh-my-pi) (OMP) extension that adds the
 
 ## Install
 
-The easy way: `pai setup omp --apply`. It writes `dawonai.ts` to `~/.omp/agent/extensions/`, with the path to `pai`, the API URL and your plan's context window filled in.
+The easy way: `pai setup omp --apply`. It writes `dawonai.ts` to `~/.omp/agent/extensions/`, with the path to `pai`, the API URL and your plan's context window filled in. When it loads, the plugin asks pai's proxy for the current context window and uses the written number only if the proxy doesn't answer.
 
 By hand:
 

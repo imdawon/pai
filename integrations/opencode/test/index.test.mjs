@@ -3,7 +3,8 @@ import assert from "node:assert/strict"
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import plugin, { DawonAISetup, createCredentialSource, createPaiFetch, defaultBaseURL } from "../dist/index.js"
+import { createServer } from "node:http"
+import plugin, { DawonAISetup, contextWindow, createCredentialSource, createPaiFetch, defaultBaseURL } from "../dist/index.js"
 
 function fakePai(t, body) {
   const dir = mkdtempSync(join(tmpdir(), "fake-pai-"))
@@ -156,7 +157,39 @@ test("OpenCode 2: setup adds the dawonai provider and model", async (t) => {
   const model = record.models.get("qwen3.8-27b")
   assert.equal(model.name, "Qwen 3.8 27B")
   assert.deepEqual(model.capabilities, { tools: true, input: ["text"], output: ["text"] })
-  assert.deepEqual(model.limit, { context: 262144, output: 32768 })
+  // No proxy answers in the test, so the number pai setup wrote is used.
+  assert.deepEqual(model.limit, { context: 131072, output: 32768 })
+})
+
+// A stand-in for pai's local proxy that answers /pai/context.
+async function fakeProxy(t, answer) {
+  const seen = []
+  const server = createServer((req, res) => {
+    seen.push({ path: req.url, auth: req.headers.authorization })
+    const [status, body] = answer()
+    res.writeHead(status, { "content-type": "application/json" })
+    res.end(JSON.stringify(body))
+  })
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
+  t.after(() => server.close())
+  return { env: { PAI_BASE_URL: `http://127.0.0.1:${server.address().port}` }, seen }
+}
+
+const key = { get: async () => "pai-local-k1", invalidate() {} }
+
+test("asks pai's local proxy for the context limit, with the local key", async (t) => {
+  const proxy = await fakeProxy(t, () => [200, { context: 65536 }])
+  assert.equal(await contextWindow(key, proxy.env), 65536)
+  assert.deepEqual(proxy.seen, [{ path: "/pai/context", auth: "Bearer pai-local-k1" }])
+})
+
+test("ignores a context limit outside 8K to 1M, and an older pai without /pai/context", async (t) => {
+  for (const answer of [[200, { context: 100 }], [200, { context: 2_000_000 }], [200, { context: "big" }], [404, {}]]) {
+    const proxy = await fakeProxy(t, () => answer)
+    assert.equal(await contextWindow(key, proxy.env), 131072, JSON.stringify(answer))
+  }
+  const broken = { get: async () => { throw new Error("no pai") }, invalidate() {} }
+  assert.equal(await contextWindow(broken, {}), 131072)
 })
 
 test("OpenCode 2: setup keeps a baseURL and name the user configured", async (t) => {

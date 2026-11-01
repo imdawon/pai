@@ -9,7 +9,7 @@ An [OpenCode](https://opencode.ai) plugin for DawonAI. It adds a `dawonai` provi
 
 ## Enable it
 
-The easy way: `pai setup opencode --apply`. It writes `src/index.ts` to `~/.config/opencode/plugins/dawonai.ts`, with the path to `pai`, the API URL and your plan's context window filled in, and sets `"model": "dawonai/qwen3.8-27b"` in `~/.config/opencode/opencode.json`.
+The easy way: `pai setup opencode --apply`. It writes `src/index.ts` to `~/.config/opencode/plugins/dawonai.ts`, with the path to `pai`, the API URL and your plan's context window filled in. When it loads, the plugin asks pai's proxy for the current context window and uses the written number only if the proxy doesn't answer, and sets `"model": "dawonai/qwen3.8-27b"` in `~/.config/opencode/opencode.json`.
 
 Or pick one of these.
 

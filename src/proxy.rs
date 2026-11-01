@@ -97,6 +97,8 @@ struct Proxy {
     streams: Mutex<Option<(usize, Arc<Semaphore>)>>,
     /// The stream limit the model API last named in `pai-streams`, and the plan it was for.
     learned_streams: Mutex<Option<(Plan, usize)>>,
+    /// The context limit the model API last named in `pai-context`.
+    learned_context: Mutex<Option<u32>>,
     stop: Notify,
     /// Requests still being answered, streamed replies included until their last byte.
     in_flight: Arc<AtomicUsize>,
@@ -219,6 +221,7 @@ pub fn run(env: Env) -> Result<()> {
             http,
             streams: Mutex::new(None),
             learned_streams: Mutex::new(None),
+            learned_context: Mutex::new(crate::setup::learned_context(&env_for_grants)),
             stop: Notify::new(),
             in_flight: Arc::new(AtomicUsize::new(0)),
             restart: AtomicBool::new(false),
@@ -449,6 +452,20 @@ async fn route(State(p): State<Arc<Proxy>>, req: Request) -> Response {
         (&Method::GET, "/pai/health") => {
             ([(header::CONTENT_TYPE, "application/json")], json!({"pai": p.fingerprint}).to_string()).into_response()
         }
+        // The OpenCode and OMP plugins ask for the limit when they load.
+        (&Method::GET, "/pai/context") => {
+            let learned = *p.learned_context.lock().unwrap();
+            let context = match learned {
+                Some(n) => n,
+                None => {
+                    let env = p.env.clone();
+                    tokio::task::spawn_blocking(move || crate::setup::context_for(&env, app::held_plan(&env)).0)
+                        .await
+                        .unwrap_or(Plan::Chat.max_context() as u32)
+                }
+            };
+            ([(header::CONTENT_TYPE, "application/json")], json!({"context": context}).to_string()).into_response()
+        }
         (&Method::POST, "/pai/stop") => {
             p.stop.notify_one();
             StatusCode::NO_CONTENT.into_response()
@@ -568,7 +585,7 @@ const DROPPED: [HeaderName; 9] = [
 
 fn forwardable(name: &HeaderName) -> bool {
     !DROPPED.contains(name)
-        && !matches!(name.as_str(), "x-api-key" | "keep-alive" | LATEST | STREAMS | GRANTS)
+        && !matches!(name.as_str(), "x-api-key" | "keep-alive" | LATEST | STREAMS | CONTEXT | GRANTS)
 }
 
 /// The model API names the latest pai release on every response, so a proxy hears of one on the
@@ -590,6 +607,33 @@ fn note_stream_limit(p: &Proxy, headers: &HeaderMap, credential: &str) {
     };
     let Ok(c) = Credential::decode(credential) else { return };
     *p.learned_streams.lock().unwrap() = Some((c.plan, n.clamp(1, MAX_LEARNED_STREAMS)));
+}
+
+/// The model API names the plan's context limit beside `pai-streams`. When it changes, pai rewrites
+/// the settings `pai setup` wrote, so each harness uses it the next time it starts. Values outside
+/// 8K to 1M are ignored. Meant for the proxy, not the coding tool.
+const CONTEXT: &str = "pai-context";
+
+fn note_context_limit(p: &Arc<Proxy>, headers: &HeaderMap) {
+    let Some(n) = headers.get(CONTEXT).and_then(|v| v.to_str().ok()).and_then(crate::setup::parse_context) else {
+        return;
+    };
+    {
+        let mut learned = p.learned_context.lock().unwrap();
+        if *learned == Some(n) {
+            return;
+        }
+        *learned = Some(n);
+    }
+    let p = p.clone();
+    tokio::task::spawn_blocking(move || {
+        if crate::setup::save_learned_context(&p.env, n).is_err() {
+            // The next response tries again.
+            *p.learned_context.lock().unwrap() = None;
+            return;
+        }
+        let _ = crate::setup::refresh(&p.env, app::held_plan(&p.env));
+    });
 }
 
 /// The model API repeats the relay's grants time on every response. When it differs from the one
@@ -701,6 +745,7 @@ async fn forward(p: Arc<Proxy>, req: Request) -> Response {
         note_announced_release(&p, resp.headers());
         note_grants(&p, resp.headers());
         note_stream_limit(&p, resp.headers(), &credential);
+        note_context_limit(&p, resp.headers());
         let status = resp.status();
         let resp_headers = resp.headers().clone();
         let transient = matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504 | 529);

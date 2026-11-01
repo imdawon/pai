@@ -4,10 +4,16 @@ import type { Plugin as PluginV2 } from "@opencode/plugin"
 
 export const PROVIDER_ID = "dawonai"
 export const MODEL_ID = "qwen3.8-27b"
-// `pai setup opencode --apply` rewrites these three lines for the user's install and plan.
+// `pai setup opencode --apply` rewrites these three lines for the user's install and plan, and pai
+// rewrites CONTEXT_WINDOW again when the model API names a new limit.
 const DEFAULT_BASE_URL = "http://127.0.0.1:47821"
 const DEFAULT_PAI_BIN = "pai"
-const CONTEXT_WINDOW = 262144
+const CONTEXT_WINDOW = 131072
+// The range pai accepts from the model API's `pai-context` header.
+const MIN_CONTEXT = 8192
+const MAX_CONTEXT = 1048576
+// How long loading waits for pai before using CONTEXT_WINDOW.
+const CONTEXT_WAIT_MS = 5000
 
 type Fetch = typeof globalThis.fetch
 
@@ -105,12 +111,47 @@ export function createPaiFetch(credentials: CredentialSource, baseFetch: Fetch =
   }
 }
 
+// Asks pai's local proxy for the plan's context limit, which pai keeps in step with the model API's
+// `pai-context` header. Uses CONTEXT_WINDOW when pai or its proxy doesn't answer in time, or answers
+// with a number outside 8K to 1M.
+export async function contextWindow(
+  credentials: CredentialSource,
+  env: NodeJS.ProcessEnv = process.env,
+  baseFetch: Fetch = globalThis.fetch,
+): Promise<number> {
+  const ask = async () => {
+    const key = await credentials.get()
+    const base = defaultBaseURL(env).replace(/\/v1$/, "")
+    const response = await baseFetch(`${base}/pai/context`, {
+      headers: { authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(CONTEXT_WAIT_MS),
+    })
+    if (!response.ok) return CONTEXT_WINDOW
+    const n = ((await response.json()) as { context?: unknown })?.context
+    return typeof n === "number" && Number.isInteger(n) && n >= MIN_CONTEXT && n <= MAX_CONTEXT ? n : CONTEXT_WINDOW
+  }
+  let timer: NodeJS.Timeout | undefined
+  const late = new Promise<number>((resolve) => {
+    timer = setTimeout(() => resolve(CONTEXT_WINDOW), CONTEXT_WAIT_MS)
+  })
+  try {
+    return await Promise.race([ask().catch(() => CONTEXT_WINDOW), late])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+export function limits(context: number): { context: number; output: number } {
+  return { context, output: Math.min(32768, Math.floor(context / 4)) }
+}
+
 export const DawonAIPlugin: Plugin = async () => {
   const credentials = createCredentialSource()
   const paiFetch = createPaiFetch(credentials)
 
   return {
     config: async (cfg) => {
+      const context = await contextWindow(credentials)
       cfg.provider ??= {}
       const existing = cfg.provider[PROVIDER_ID] ?? {}
       cfg.provider[PROVIDER_ID] = {
@@ -127,7 +168,7 @@ export const DawonAIPlugin: Plugin = async () => {
           [MODEL_ID]: {
             name: "Qwen 3.8 27B",
             tool_call: true,
-            limit: { context: CONTEXT_WINDOW, output: Math.min(32768, CONTEXT_WINDOW / 4) },
+            limit: limits(context),
           },
           ...existing.models,
         },
@@ -148,6 +189,7 @@ export const DawonAISetup: PluginV2.Plugin["setup"] = async (ctx) => {
 
   const credentials = createCredentialSource()
   let sent: string | undefined
+  const context = await contextWindow(credentials)
 
   await ctx.provider.transform((providers) => {
     providers.update(PROVIDER_ID, (provider) => {
@@ -162,7 +204,7 @@ export const DawonAISetup: PluginV2.Plugin["setup"] = async (ctx) => {
     providers.models.update(PROVIDER_ID, MODEL_ID, (model) => {
       if (!model.name || model.name === MODEL_ID) model.name = "Qwen 3.8 27B"
       model.capabilities = { ...model.capabilities, tools: true, input: ["text"], output: ["text"] }
-      model.limit = { ...model.limit, context: CONTEXT_WINDOW, output: Math.min(32768, CONTEXT_WINDOW / 4) }
+      model.limit = { ...model.limit, ...limits(context) }
     })
   })
 

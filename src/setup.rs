@@ -31,21 +31,59 @@ pub struct Target {
     pub base_url: String,
     pub pai_bin: String,
     pub context: u32,
+    /// Whether `context` came from the model API's `pai-context` header or the held plan, rather
+    /// than a guess.
     pub plan_known: bool,
+}
+
+/// The smallest and largest context limits pai accepts from a `pai-context` header. A value
+/// outside them is ignored, so a broken gateway can't write nonsense into harness settings.
+pub const MIN_CONTEXT: u64 = 8_192;
+pub const MAX_CONTEXT: u64 = 1_048_576;
+
+fn context_file(env: &Env) -> PathBuf {
+    env.paths.config_dir.join("context-limit")
+}
+
+/// Parses a context limit as the model API names it, if it's inside the accepted range.
+pub fn parse_context(v: &str) -> Option<u32> {
+    v.trim().parse::<u64>().ok().filter(|n| (MIN_CONTEXT..=MAX_CONTEXT).contains(n)).map(|n| n as u32)
+}
+
+/// The context limit the model API last named in `pai-context`, if pai has seen one.
+pub fn learned_context(env: &Env) -> Option<u32> {
+    fs::read_to_string(context_file(env)).ok().and_then(|t| parse_context(&t))
+}
+
+/// Keeps the context limit the model API named, for `pai setup`, the plugins and the next proxy.
+pub fn save_learned_context(env: &Env, n: u32) -> Result<()> {
+    let dir = &env.paths.config_dir;
+    fs::create_dir_all(dir).map_err(|e| io_err("create", dir, e))?;
+    let path = context_file(env);
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, format!("{n}\n")).map_err(|e| io_err("write", &tmp, e))?;
+    fs::rename(&tmp, &path).map_err(|e| io_err("write", &path, e))
+}
+
+/// The context limit to write into harness settings: the one the model API last named, or else the
+/// plan's limit built into pai. The bool says whether either was known.
+pub fn context_for(env: &Env, plan: Option<Plan>) -> (u32, bool) {
+    match (learned_context(env), plan) {
+        (Some(n), _) => (n, true),
+        (None, Some(p)) => (p.max_context() as u32, true),
+        (None, None) => (Plan::Chat.max_context() as u32, false),
+    }
 }
 
 impl Target {
     pub fn resolve(env: &Env, plan: Option<Plan>) -> Target {
         let base_url = crate::proxy::url(env);
-        let context = match plan {
-            Some(p) => p.max_context() as u32,
-            None => Plan::Chat.max_context() as u32,
-        };
+        let (context, plan_known) = context_for(env, plan);
         Target {
             base_url,
             pai_bin: env.pai_bin.to_string_lossy().into_owned(),
             context,
-            plan_known: plan.is_some(),
+            plan_known,
         }
     }
 
@@ -59,7 +97,7 @@ pub fn run(env: &Env, tool: Tool, target: &Target, apply: bool) -> Result<String
     if !target.plan_known {
         out.push_str(&format!(
             "Note: couldn't read your plan, so the context window is set to {} tokens. \
-             On the Agent plan, run this again after `pai pair` to get 262144.\n\n",
+             pai updates it by itself once the model API names your plan's limit.\n\n",
             target.context
         ));
     }
@@ -276,10 +314,11 @@ pub fn set_up_tools(env: &Env) -> Vec<Tool> {
     TOOLS.into_iter().filter(|t| is_set_up(env, *t)).collect()
 }
 
-/// After an update: writes each tool's config again, as this version of pai would, for the tools
-/// pai set up. Settings written as values (the context window) change with releases, and a new
-/// binary alone doesn't change them. Only files that differ are touched, each backed up first.
-/// Skipped when the plan isn't known, so a lost plan never shrinks an Agent plan's context.
+/// After an update, or when the model API names a new context limit: writes each tool's config
+/// again, as this version of pai would, for the tools pai set up. Settings written as values (the
+/// context window) don't change by themselves. Only files that differ are touched, each backed up
+/// first. Skipped when neither the plan nor a named limit is known, so a guess never shrinks a
+/// plan's context.
 pub fn refresh(env: &Env, plan: Option<Plan>) -> Vec<(Tool, Result<bool>)> {
     let target = Target::resolve(env, plan);
     if !target.plan_known {
