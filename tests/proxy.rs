@@ -33,6 +33,8 @@ struct Seen {
     refuse_streams: usize,
     /// The stream limit to name in `pai-streams` on every response.
     streams_header: Option<String>,
+    /// The context limit to name in `pai-context` on every response.
+    context_header: Option<String>,
     /// How many requests to fail with `503` first.
     fail_first: usize,
     /// The relay's grants time to name in `pai-grants` on every response.
@@ -117,9 +119,9 @@ fn fake_gateway(seen: Arc<Mutex<Seen>>) -> (u16, String, String) {
                                     s.open += 1;
                                     s.most_open = s.most_open.max(s.open);
                                 }
-                                (status, body, open.then_some(s.slow).flatten(), s.announce.clone(), (s.streams_header.clone(), s.grants_header.clone()))
+                                (status, body, open.then_some(s.slow).flatten(), s.announce.clone(), (s.streams_header.clone(), s.grants_header.clone(), s.context_header.clone()))
                             };
-                            let (limit, grants) = limit;
+                            let (limit, grants, context) = limit;
                             if let Some(d) = slow {
                                 tokio::time::sleep(d).await;
                             }
@@ -138,6 +140,9 @@ fn fake_gateway(seen: Arc<Mutex<Seen>>) -> (u16, String, String) {
                             }
                             if let Some(v) = &grants {
                                 builder = builder.header("pai-grants", v.as_str());
+                            }
+                            if let Some(v) = &context {
+                                builder = builder.header("pai-context", v.as_str());
                             }
                             Ok::<_, Infallible>(builder.body(http_body_util::Full::new(bytes::Bytes::from(body))).unwrap())
                         }
@@ -369,6 +374,44 @@ fn follows_the_stream_limit_the_api_names() {
     assert_eq!(p.post("/v1/messages", Some(&p.key), &[]).0, 200);
     assert_eq!(send_at_once(&p, 4), [200; 4]);
     assert_eq!(seen.lock().unwrap().most_open, 2, "the API's number, not the one built into pai");
+}
+
+#[test]
+fn follows_the_context_limit_the_api_names() {
+    let seen = Arc::new(Mutex::new(Seen { context_header: Some("65536".into()), ..Seen::default() }));
+    let (api_port, ca, pin) = fake_gateway(seen.clone());
+    let (p, _relay) = start(api_port, &ca, &pin);
+    let env = p._t.env.clone();
+    let settings = p._t.home().join(".claude").join("settings.json");
+    let written = || -> Value { serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap() };
+    let asked = || -> Value {
+        p.http.get(format!("http://127.0.0.1:{}/pai/context", p.port)).bearer_auth(&p.key).send().unwrap().json().unwrap()
+    };
+    pai::setup::run(&env, pai::setup::Tool::ClaudeCode, &pai::setup::Target::resolve(&env, Some(pai_proto::Plan::Chat)), true).unwrap();
+    assert_eq!(written()["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "131072");
+    assert_eq!(asked()["context"], 131072, "before any header, the plan's limit built into pai");
+
+    let r = p.http.post(format!("http://127.0.0.1:{}/v1/messages", p.port)).header("x-api-key", &p.key).body("{}").send().unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert!(r.headers().get("pai-context").is_none(), "the limit is for pai, not the coding tool");
+    for _ in 0..100 {
+        if written()["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "65536" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(written()["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "65536", "pai rewrote its own settings");
+    assert_eq!(asked()["context"], 65536);
+    assert_eq!(pai::setup::learned_context(&env), Some(65536));
+
+    // A broken gateway can't write nonsense into the harness settings.
+    for bad in ["100", "99999999", "lots"] {
+        seen.lock().unwrap().context_header = Some(bad.into());
+        assert_eq!(p.post("/v1/messages", Some(&p.key), &[]).0, 200);
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(written()["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "65536");
+    assert_eq!(asked()["context"], 65536);
 }
 
 #[test]

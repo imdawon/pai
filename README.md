@@ -102,6 +102,8 @@ A build from source never updates itself. `pai` 0.1.3 and earlier can't update: 
 
 Run `pai setup <tool>` to see the exact config, with the path to `pai`, the proxy's address and your plan's context window filled in. `--apply` writes it. Every tool talks to the proxy, never to the model API directly.
 
+The model API names your plan's context window in a `pai-context` header (128K, 131,072 tokens, on every plan today). pai's proxy keeps the last value it saw and, when it changes, rewrites the settings `--apply` wrote, backing up each file it changes; each harness uses the new value the next time it starts. pai takes only values from 8K to 1M (8,192 to 1,048,576 tokens) and ignores anything else. The OpenCode and OMP plugins ask the proxy for the value when they load, at `GET /pai/context` with the local key, and fall back to the number written into them.
+
 `--apply` also installs the DawonAI skill, `skill/dawonai/SKILL.md`, as a personal skill named `dawonai`. It tells the tool's agent how `pai` works and how to fix problems with it. Running `pai setup` again replaces it, after a backup. `pai unpair` leaves it in place.
 
 | Tool | Skill file |

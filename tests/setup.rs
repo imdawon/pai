@@ -473,9 +473,33 @@ fn refresh_rewrites_only_what_a_new_version_changes() {
     let changed: Vec<Tool> = done.iter().filter(|(_, r)| matches!(r, Ok(true))).map(|(t, _)| *t).collect();
     assert_eq!(changed, vec![Tool::ClaudeCode, Tool::Codex], "only the tools pai set up");
     let v: Value = serde_json::from_str(&fs::read_to_string(claude.join("settings.json")).unwrap()).unwrap();
-    assert_eq!(v["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "262144");
+    assert_eq!(v["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "131072");
     assert_eq!(backups(&claude).len(), 1);
     assert!(!t.home().join(".config/opencode").exists(), "a tool pai never set up stays untouched");
+}
+
+#[test]
+fn the_limit_the_model_api_named_wins_over_the_built_in_one() {
+    let t = TestEnv::new();
+    assert_eq!(setup::context_for(&t.env, Some(pai_proto::Plan::Agent)), (131072, true));
+    assert_eq!(setup::context_for(&t.env, None), (131072, false));
+    setup::run(&t.env, Tool::Omp, &target(&t, 131072), true).unwrap();
+
+    setup::save_learned_context(&t.env, 65536).unwrap();
+    assert_eq!(setup::learned_context(&t.env), Some(65536));
+    assert_eq!(setup::context_for(&t.env, Some(pai_proto::Plan::Agent)), (65536, true));
+    // With a named limit, even an unknown plan rewrites the settings pai wrote.
+    let done = setup::refresh(&t.env, None);
+    assert!(matches!(done.as_slice(), [(Tool::Omp, Ok(true))]), "{done:?}");
+    let ext = fs::read_to_string(t.home().join(".omp/agent/extensions/dawonai.ts")).unwrap();
+    assert!(ext.contains("const CONTEXT_WINDOW = 65536;\n"), "{ext}");
+
+    // Values outside 8K to 1M are never taken.
+    for bad in ["100", "8191", "1048577", "-5", "lots", ""] {
+        assert_eq!(setup::parse_context(bad), None, "{bad}");
+    }
+    assert_eq!(setup::parse_context(" 8192 "), Some(8192));
+    assert_eq!(setup::parse_context("1048576"), Some(1048576));
 }
 
 #[test]
