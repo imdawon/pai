@@ -153,6 +153,21 @@ for bin in "$out"/pai-*; do
 		{ echo "build: $(basename "$bin") doesn't point at relay.$PAI_RELEASE_DOMAIN" >&2; exit 1; }
 done
 
+# Every binary must carry the release key in release/signing-key.pub, and no other Ed25519 key.
+# pai trusts an update only if it's signed by the key compiled into it, so a binary with any other
+# key can never update itself. 0.1.10's Linux and Windows binaries shipped with a test key because
+# Docker reused a cached build from a copy of this repo.
+for bin in "$out"/pai-*; do
+	keys="$(grep -ao 'MCowBQYDK2VwAyEA[A-Za-z0-9+/]\{43\}=' "$bin" | sort -u)"
+	[ "$keys" = "$SPKI_B64" ] || {
+		echo "build: $(basename "$bin") doesn't carry exactly the release key $KEY_ID from release/signing-key.pub. It carries:" >&2
+		printf '  %s\n' ${keys:-none} >&2
+		echo "A cached build is the likely cause. Run: docker volume rm pai-target-linux-aarch64 pai-target-linux-x86_64 pai-target-xwin, then build again." >&2
+		exit 1
+	}
+done
+echo "ok    every binary carries release key $KEY_ID"
+
 # What `pai update` reads first, to tell whether there's anything newer. Signed like every file.
 printf '%s\n' "$version" >"$out/VERSION"
 
