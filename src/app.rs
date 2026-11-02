@@ -785,6 +785,7 @@ pub fn prefetch(env: &Env, plan: Plan, target: u32, delay: Duration) -> Result<b
 fn plan_label(id: &str) -> &str {
     match id {
         "day" => "1-day trial",
+        "lite" => "Lite",
         "chat" => "Chat, monthly",
         "chat3" => "Chat, 3 months",
         "agent" => "Agent",

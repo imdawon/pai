@@ -199,7 +199,8 @@ impl Relay {
     }
 
     pub fn keys(&self) -> Result<IssuerKeys> {
-        self.call(Method::GET, "/v1/keys", None::<&()>, None)
+        // ?all=1 includes Lite, which the relay leaves out of the plain list for older pai.
+        self.call(Method::GET, "/v1/keys?all=1", None::<&()>, None)
             .map_err(|e| match e {
                 CallError::Pai(e) => e,
                 CallError::Http(f) => generic(f),
