@@ -1,0 +1,48 @@
+# Runs on DawonAI's own Forgejo runner on daserver. GitHub ignores this folder.
+name: CI
+
+on: [push]
+
+jobs:
+  checks:
+    runs-on: rust
+    timeout-minutes: 90
+    steps:
+      # Forgejo gives jobs its tailnet address, which the runner VM can't reach, so this clones from
+      # Forgejo on the VM network instead of using actions/checkout (pai-gateway deploy/forge/README.md).
+      - name: Check out from Forgejo
+        env:
+          JOB_TOKEN: ${{ github.token }}
+          READ_TOKEN: ${{ secrets.FORGE_READ_TOKEN }}
+        run: |
+          set -eu
+          get() {
+            git init -q "$1"
+            git -C "$1" fetch -q --depth 1 "http://ci:$3@10.90.0.10:3000/$2.git" "$4"
+            git -C "$1" checkout -q FETCH_HEAD
+            echo "$1 at $(git -C "$1" rev-parse HEAD)"
+          }
+          get pai "$GITHUB_REPOSITORY" "$JOB_TOKEN" "$GITHUB_SHA"
+          # Built against pai-relay's crates, from its master branch. FORGE_READ_TOKEN is a
+          # read-only token set once as a user-level Actions secret.
+          [ -n "$READ_TOKEN" ] || { echo "FORGE_READ_TOKEN isn't set (pai-gateway deploy/forge/README.md)" >&2; exit 1; }
+          get pai-relay "$GITHUB_REPOSITORY_OWNER/pai-relay" "$READ_TOKEN" refs/heads/master
+      - name: Tests
+        working-directory: pai
+        run: cargo test --locked
+      # A clean release build, then the check that 0.1.10 lacked: the binary must carry the
+      # keys in release/signing-key.pub and release/backup-key.pub.
+      - name: Clean release build carries both release keys
+        working-directory: pai
+        run: |
+          set -eu
+          cargo build --release --locked
+          for k in release/signing-key.pub release/backup-key.pub; do
+            grep -v -- '-----' "$k" | while IFS= read -r line; do
+              grep -aqF "$line" target/release/pai || { echo "target/release/pai doesn't carry $k" >&2; exit 1; }
+            done
+          done
+          echo "both release keys are in the binary"
+      - name: Installers carry the release key
+        working-directory: pai
+        run: release/embed-key.sh --check
