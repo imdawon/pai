@@ -25,6 +25,7 @@ fail() { echo "publish: $*" >&2; exit 1; }
 step() { printf '\n== %s\n' "$*"; }
 
 : "${PAI_SIGNING_KEY:?set PAI_SIGNING_KEY to the release key on its drive (release/SIGNING.md)}"
+: "${PAI_BACKUP_KEY:?set PAI_BACKUP_KEY to the backup release key (release/SIGNING.md)}"
 command -v node >/dev/null || fail "needs node"
 command -v wrangler >/dev/null || fail "needs wrangler (npm install -g wrangler, then wrangler login)"
 
@@ -47,7 +48,7 @@ version="$(awk -F'"' '/^version *=/ { print $2; exit }' Cargo.toml)"
 dist="$root/dist"
 key_id="$(sed -n "s/^SIGNING_KEY_ID='\(.*\)'$/\1/p" install.sh)"
 [ -f "$dist/latest/SHA256SUMS.$key_id.sig" ] || fail "release/build.sh left no release in dist/latest signed with key $key_id"
-# Every signature file: this key's, and while the key changes, the old key's.
+# Every signature file: the main key's, the backup key's, and while the key changes, the old key's.
 sigs="$(cd "$dist/latest" && ls SHA256SUMS*.sig SHA256SUMS*.sshsig)"
 
 step "site for $domain"

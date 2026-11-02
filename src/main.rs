@@ -91,6 +91,10 @@ enum Command {
         #[arg(long, hide = true, conflicts_with = "auto")]
         refresh: bool,
     },
+    // Run by release/build.sh on each binary it builds: checks the signed release in DIR with every
+    // release key built into this binary. Hidden: not for users.
+    #[command(hide = true)]
+    CheckRelease { dir: std::path::PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -210,6 +214,11 @@ fn run(command: Command) -> Result<(), Error> {
                 }
                 Err(_) if auto => {}
                 Err(e) => return Err(e),
+            }
+        }
+        Command::CheckRelease { dir } => {
+            for id in pai::update::check_release(&env, &dir)? {
+                println!("ok {id}");
             }
         }
         Command::Proxy => pai::proxy::run(env)?,

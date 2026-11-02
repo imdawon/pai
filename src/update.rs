@@ -1,8 +1,9 @@
 //! Updates `pai` in place from `<api>/pai/latest/`, over the same pinned TLS as model requests,
 //! so an update check reaches only the box, through the relay, like any request.
 //!
-//! A release is trusted only if `SHA256SUMS` carries a valid signature from the offline release
-//! key built into `pai` (release/SIGNING.md), and each file matches its hash there. The server is
+//! A release is trusted only if `SHA256SUMS` carries a valid signature from one of the two release
+//! keys built into `pai`, the main key and the backup key (release/SIGNING.md), and each file
+//! matches its hash there. Either key alone is enough, so losing one never strands an install. The server is
 //! never trusted for anything else, and a release older than this one is refused.
 //!
 //! `pai` isn't always running, so when to check lives on disk (`update.json`): any `pai token`
@@ -21,7 +22,8 @@ use sha2::{Digest, Sha256};
 use crate::app::{self, Env};
 use crate::error::{Error, Result, io_err};
 
-const RELEASE_KEY_PEM: &str = include_str!("../release/signing-key.pub");
+/// The main release key, then the backup key. Every release is signed with both.
+const RELEASE_KEY_PEMS: [&str; 2] = [include_str!("../release/signing-key.pub"), include_str!("../release/backup-key.pub")];
 const CHECK_EVERY: i64 = 24 * 3600;
 /// Spread out so every installed `pai` doesn't check at the same moment.
 const JITTER: i64 = 6 * 3600;
@@ -154,7 +156,7 @@ pub fn run(env: &Env) -> Result<Outcome> {
     let asset = asset().ok_or_else(|| Error::Update("there's no release of pai for this platform".into()))?;
     let base = format!("{}/pai/latest", app::api_url(env));
     let http = client(env)?;
-    let key = release_key(env)?;
+    let keys = release_keys(env)?;
 
     // Unchecked, but a server that lies here can only make pai skip an update, which it could do by
     // not answering at all.
@@ -165,10 +167,24 @@ pub fn run(env: &Env) -> Result<Outcome> {
     }
 
     let sums = get(&http, &format!("{base}/SHA256SUMS"), MAX_TEXT)?;
-    // Named after the key, so a release can carry the old key's signature as well while the key
-    // changes (release/SIGNING.md). pai up to 0.1.9 reads SHA256SUMS.sig.
-    let sig = get(&http, &format!("{base}/SHA256SUMS.{}.sig", key.id), MAX_TEXT)?;
-    verify_signature(&key.raw, &sums, &sig)?;
+    // Each signature is named after its key (release/SIGNING.md); pai up to 0.1.9 reads
+    // SHA256SUMS.sig. The main key's is tried first, then the backup key's: one valid signature from
+    // either is enough.
+    let mut failure = None;
+    for key in &keys {
+        match get(&http, &format!("{base}/SHA256SUMS.{}.sig", key.id), MAX_TEXT).and_then(|sig| verify_signature(&key.raw, &sums, &sig)) {
+            Ok(()) => {
+                failure = None;
+                break;
+            }
+            Err(e) => {
+                failure.get_or_insert(e);
+            }
+        }
+    }
+    if let Some(e) = failure {
+        return Err(e);
+    }
     let hashes = parse_sums(&sums)?;
     check_hash(&hashes, "VERSION", &announced)?;
 
@@ -225,16 +241,43 @@ pub struct ReleaseKey {
     pub id: String,
 }
 
-/// The release key from the PEM built into `pai`. Staging builds can swap it for a test key with
-/// `PAI_TEST_RELEASE_KEY` (the same PEM).
-fn release_key(env: &Env) -> Result<ReleaseKey> {
+/// The release keys built into `pai`: the main key, then the backup key. Staging builds can swap
+/// them for test keys with `PAI_TEST_RELEASE_KEY`, a file of one or more PEM public keys.
+pub fn release_keys(env: &Env) -> Result<Vec<ReleaseKey>> {
     #[cfg(feature = "test-mode")]
     if let Some(path) = env.var("PAI_TEST_RELEASE_KEY") {
         let pem = fs::read_to_string(path).map_err(|e| io_err("read", Path::new(path), e))?;
-        return parse_key(&pem);
+        return pem_blocks(&pem).map(parse_key).collect();
     }
     let _ = env;
-    parse_key(RELEASE_KEY_PEM)
+    RELEASE_KEY_PEMS.iter().map(|pem| parse_key(pem)).collect()
+}
+
+/// Each `-----BEGIN PUBLIC KEY-----` block in `text`, markers included.
+#[cfg(feature = "test-mode")]
+fn pem_blocks(text: &str) -> impl Iterator<Item = &str> {
+    text.split_inclusive("-----END PUBLIC KEY-----").filter(|b| b.contains("-----BEGIN PUBLIC KEY-----"))
+}
+
+/// `pai check-release <dir>`, run by release/build.sh on every binary it builds: checks the signed
+/// release in `dir` with each key built into this binary, and prints each key's ID once its
+/// signature verifies and every file SHA256SUMS lists matches. Fails unless both keys' do.
+pub fn check_release(env: &Env, dir: &Path) -> Result<Vec<String>> {
+    let read = |name: &str| fs::read(dir.join(name)).map_err(|e| io_err("read", &dir.join(name), e));
+    let sums = read("SHA256SUMS")?;
+    for (_, name) in parse_sums(&sums)? {
+        if name.contains(['/', '\\']) || name.starts_with('.') {
+            return Err(Error::Update(format!("SHA256SUMS names {name}")));
+        }
+        check_hash(&parse_sums(&sums)?, &name, &read(&name)?)?;
+    }
+    let mut ids = Vec::new();
+    for key in release_keys(env)? {
+        let sig = read(&format!("SHA256SUMS.{}.sig", key.id))?;
+        verify_signature(&key.raw, &sums, &sig).map_err(|_| Error::Update(format!("SHA256SUMS.{}.sig doesn't verify with release key {}", key.id, key.id)))?;
+        ids.push(key.id);
+    }
+    Ok(ids)
 }
 
 pub fn parse_key(pem: &str) -> Result<ReleaseKey> {
@@ -393,8 +436,10 @@ mod tests {
     }
 
     #[test]
-    fn reads_the_built_in_release_key() {
-        let key = parse_key(RELEASE_KEY_PEM).unwrap();
+    fn reads_the_built_in_release_keys() {
+        let keys: Vec<_> = RELEASE_KEY_PEMS.iter().map(|pem| parse_key(pem).unwrap()).collect();
+        assert_ne!(keys[0].raw, keys[1].raw, "the backup key is a second key");
+        let key = &keys[0];
         // The same ID release/embed-key.sh wrote into the installers, so pai and the installers read
         // the same signature file.
         let install = include_str!("../install.sh");

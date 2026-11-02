@@ -33,6 +33,8 @@ describe() {
 	"SHA256SUMS.$key_id.sig") echo "Ed25519 signature of SHA256SUMS, for OpenSSL 3" ;;
 	"SHA256SUMS.$key_id.sshsig") echo "The same signature in OpenSSH's format, for ssh-keygen" ;;
 	SHA256SUMS.sig | SHA256SUMS.sshsig) echo "The retired key's signature, for pai 0.1.9 and older to update" ;;
+	SHA256SUMS.*.sig) echo "The backup release key's signature, for OpenSSL 3" ;;
+	SHA256SUMS.*.sshsig) echo "The backup release key's signature, for ssh-keygen" ;;
 	*) echo "" ;;
 	esac
 }
@@ -40,6 +42,7 @@ rows=""
 for f in pai-aarch64-apple-darwin pai-x86_64-apple-darwin pai-x86_64-unknown-linux-musl \
 	pai-aarch64-unknown-linux-musl pai-x86_64-pc-windows-msvc.exe pai-aarch64-pc-windows-msvc.exe \
 	dawonai-skill.zip opencode-dawonai.ts omp-dawonai.ts SHA256SUMS "SHA256SUMS.$key_id.sig" "SHA256SUMS.$key_id.sshsig" \
+	$(cd "$out" && ls SHA256SUMS.*.sig SHA256SUMS.*.sshsig | grep -v "^SHA256SUMS\.$key_id\.") \
 	$(cd "$out" && ls SHA256SUMS.sig SHA256SUMS.sshsig 2>/dev/null); do
 	hash="$(awk -v f="$f" '$2 == f { print $1 }' "$out/SHA256SUMS")"
 	rows="$rows
