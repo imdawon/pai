@@ -100,11 +100,16 @@ struct Install {
 
 /// A copy of pai in its own folder, since an update replaces the binary that runs it.
 fn install(trusted: &Ed25519KeyPair) -> Install {
+    install_trusting(&[trusted])
+}
+
+/// The same, trusting each of `keys` as release builds trust the main and backup keys.
+fn install_trusting(keys: &[&Ed25519KeyPair]) -> Install {
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("bin/pai");
     fs::create_dir_all(bin.parent().unwrap()).unwrap();
     fs::copy(env!("CARGO_BIN_EXE_pai"), &bin).unwrap();
-    fs::write(dir.path().join("release-key.pem"), pem(trusted)).unwrap();
+    fs::write(dir.path().join("release-key.pem"), keys.iter().map(|k| pem(k)).collect::<String>()).unwrap();
     Install { dir, bin }
 }
 
@@ -207,6 +212,101 @@ fn installs_a_hand_over_release_signed_by_both_keys() {
     let out = update(&i, &release);
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert_eq!(fs::read(&i.bin).unwrap(), NEW_BINARY);
+}
+
+#[test]
+fn installs_a_release_signed_by_either_trusted_key() {
+    let main = keypair();
+    let backup = keypair();
+    // Signed by the main key only, then by the backup key only.
+    for signer in [&main, &backup] {
+        let release = Release::serve();
+        let i = install_trusting(&[&main, &backup]);
+        release.publish(signer, "99.0.0", NEW_BINARY);
+        let out = update(&i, &release);
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        assert_eq!(fs::read(&i.bin).unwrap(), NEW_BINARY);
+    }
+}
+
+#[test]
+fn falls_back_to_the_backup_keys_signature_when_the_main_one_is_bad() {
+    let main = keypair();
+    let backup = keypair();
+    let release = Release::serve();
+    let i = install_trusting(&[&main, &backup]);
+    release.publish(&backup, "99.0.0", NEW_BINARY);
+    release.set(&format!("SHA256SUMS.{}.sig", key_id(&main)), &[0u8; 64]);
+    let out = update(&i, &release);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(fs::read(&i.bin).unwrap(), NEW_BINARY);
+}
+
+#[test]
+fn refuses_a_release_signed_by_neither_trusted_key() {
+    let i = install_trusting(&[&keypair(), &keypair()]);
+    let release = Release::serve();
+    release.publish(&keypair(), "99.0.0", NEW_BINARY);
+    let out = update(&i, &release);
+    assert!(!out.status.success());
+    assert!(unchanged(&i.bin));
+}
+
+/// The release folder as release/build.sh leaves it, signed by `signers`.
+fn release_dir(signers: &[&Ed25519KeyPair]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let asset = pai::update::asset().unwrap();
+    fs::write(dir.path().join("VERSION"), "99.0.0\n").unwrap();
+    fs::write(dir.path().join(asset), NEW_BINARY).unwrap();
+    let mut sums = String::new();
+    for n in [asset, "VERSION"] {
+        let h: String = Sha256::digest(fs::read(dir.path().join(n)).unwrap()).iter().map(|b| format!("{b:02x}")).collect();
+        sums.push_str(&format!("{h}  {n}\n"));
+    }
+    for k in signers {
+        fs::write(dir.path().join(format!("SHA256SUMS.{}.sig", key_id(k))), k.sign(sums.as_bytes())).unwrap();
+    }
+    fs::write(dir.path().join("SHA256SUMS"), sums).unwrap();
+    dir
+}
+
+fn check_release(i: &Install, dir: &Path) -> Output {
+    Command::new(&i.bin)
+        .arg("check-release")
+        .arg(dir)
+        .env_clear()
+        .env("HOME", i.dir.path().join("home"))
+        .env("PAI_CONFIG_DIR", i.dir.path().join("config"))
+        .env("PAI_TEST_RELEASE_KEY", i.dir.path().join("release-key.pem"))
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn check_release_passes_only_when_both_keys_signed() {
+    let main = keypair();
+    let backup = keypair();
+    let i = install_trusting(&[&main, &backup]);
+
+    let both = release_dir(&[&main, &backup]);
+    let out = check_release(&i, both.path());
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), format!("ok {}\nok {}\n", key_id(&main), key_id(&backup)));
+
+    for one in [&main, &backup] {
+        let out = check_release(&i, release_dir(&[one]).path());
+        assert!(!out.status.success(), "a release signed by one key fails the check");
+    }
+
+    // A binary built with another key, as 0.1.10's Linux and Windows builds were, fails it too.
+    let stray = install_trusting(&[&keypair(), &backup]);
+    assert!(!check_release(&stray, both.path()).status.success());
+
+    // So does a file that doesn't match SHA256SUMS.
+    fs::write(both.path().join("VERSION"), "100.0.0\n").unwrap();
+    let out = check_release(&i, both.path());
+    assert!(!out.status.success());
+    assert!(text(&out.stderr).contains("VERSION doesn't match"), "{}", text(&out.stderr));
 }
 
 #[test]

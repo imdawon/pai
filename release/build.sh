@@ -2,9 +2,12 @@
 # Builds every pai release file into dist/<version>/, copies it to dist/latest/, and writes
 # dist/index.html (release/index.sh). dist/ is what gets hosted at https://<domain>/pai/.
 #
-# Signs SHA256SUMS with the release key at $PAI_SIGNING_KEY, a PEM Ed25519 private key kept as
-# release/SIGNING.md says, and refuses to build without it. While the key changes, it also signs
-# with the old key at $PAI_HANDOVER_KEY. Needs OpenSSL 3 for Ed25519.
+# Signs SHA256SUMS with the main release key at $PAI_SIGNING_KEY and the backup release key at
+# $PAI_BACKUP_KEY, PEM Ed25519 private keys kept as release/SIGNING.md says, and refuses to build
+# without both. pai trusts both keys and needs only one valid signature, so losing one key never
+# strands an install. While the key changes, it also signs with the old key at $PAI_HANDOVER_KEY.
+# Before anything is published, every binary is checked to carry exactly the two keys, and every
+# binary this machine can run checks the signed release itself with each key. Needs OpenSSL 3.
 #
 # Runs on a Mac: the macOS binaries build natively, Linux and Windows build in Docker.
 set -eu
@@ -30,17 +33,27 @@ export PAI_RELEASE_APP_URL="https://app.$PAI_RELEASE_DOMAIN"
 # Check the signing key before spending time on the build.
 : "${PAI_SIGNING_KEY:?set PAI_SIGNING_KEY to the path of the release signing key (release/SIGNING.md)}"
 [ -r "$PAI_SIGNING_KEY" ] || { echo "build: can't read the signing key $PAI_SIGNING_KEY" >&2; exit 1; }
+: "${PAI_BACKUP_KEY:?set PAI_BACKUP_KEY to the path of the backup release key (release/SIGNING.md)}"
+[ -r "$PAI_BACKUP_KEY" ] || { echo "build: can't read the backup key $PAI_BACKUP_KEY" >&2; exit 1; }
 . release/signing.sh
 find_openssl
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 trap 'stty echo 2>/dev/null; exit 1' INT TERM
 
-# Asks for key file $1's passphrase, if it has one, into $2. Asked once here, and handed to openssl
-# on stdin for each signature.
+# Reads key file $1's passphrase, if it has one, into $2: from the Mac's login keychain when it's
+# saved there (service dawonai-pai-release, account = the key file's name; release/SIGNING.md),
+# otherwise asked once here. Handed to openssl on stdin for each signature.
 ask_pass() {
 	unset "$2"
 	grep -q 'ENCRYPTED' "$1" || return 0
+	if command -v security >/dev/null 2>&1 &&
+		saved="$(security find-generic-password -s dawonai-pai-release -a "$(basename "$1")" -w 2>/dev/null)"; then
+		eval "$2=\$saved"
+		unset saved
+		echo "build: passphrase for $(basename "$1") read from the login keychain" >&2
+		return 0
+	fi
 	[ -t 0 ] || { echo "build: $1 has a passphrase; run release/build.sh in a terminal" >&2; exit 1; }
 	printf 'Passphrase for %s: ' "$1" >&2
 	stty -echo
@@ -83,6 +96,17 @@ sh release/embed-key.sh --check
 ask_pass "$PAI_SIGNING_KEY" NEW_PASS
 check_pair "$PAI_SIGNING_KEY" NEW_PASS "$work/spki.der" release/signing-key.pub
 
+# The backup key: built into pai beside the main key, and signs every release too.
+mkdir "$work/backup"
+MAIN_SPKI_B64="$SPKI_B64" MAIN_SSH_B64="$SSH_B64" MAIN_KEY_ID="$KEY_ID"
+key_material release/backup-key.pub "$work/backup" || { echo "build: release/backup-key.pub isn't an Ed25519 public key" >&2; exit 1; }
+BACKUP_SPKI_B64="$SPKI_B64" BACKUP_SSH_B64="$SSH_B64" BACKUP_KEY_ID="$KEY_ID"
+SPKI_B64="$MAIN_SPKI_B64" SSH_B64="$MAIN_SSH_B64" KEY_ID="$MAIN_KEY_ID"
+[ "$BACKUP_SPKI_B64" != "$SPKI_B64" ] || { echo "build: release/backup-key.pub is the same key as release/signing-key.pub" >&2; exit 1; }
+[ "$handover" = false ] || [ "$BACKUP_SPKI_B64" != "$OLD_SPKI_B64" ] || { echo "build: release/backup-key.pub is the retired key in release/handover-key.pub" >&2; exit 1; }
+ask_pass "$PAI_BACKUP_KEY" BACKUP_PASS
+check_pair "$PAI_BACKUP_KEY" BACKUP_PASS "$work/backup/spki.der" release/backup-key.pub
+
 version="$(awk -F'"' '/^version *=/ { print $2; exit }' Cargo.toml)"
 [ -n "$version" ] || { echo "build: no version in Cargo.toml" >&2; exit 1; }
 dist="$root/dist"
@@ -98,6 +122,10 @@ export PAI_RELEASE_API_PINS
 
 # Every cargo build below leaves out the `test-mode` feature, so release binaries have no test mode
 # (docs/TESTING.md). Never add --features here.
+
+# Docker's build caches are named after this checkout, so no other copy of the repo can feed this
+# build (0.1.10's Linux and Windows binaries came from a rehearsal's cache with another key).
+cache="$(printf '%s' "$root" | shasum -a 256 | cut -c1-12)"
 
 # pai-proto is a path dependency on ../pai-relay, so the containers need both checkouts.
 relay="$(cd "$root/../pai-relay" && pwd)"
@@ -117,7 +145,7 @@ for arch in aarch64 x86_64; do
 	step "$target ($platform)"
 	docker run --rm --platform "$platform" \
 		-v "$root:/src/pai:ro" -v "$relay:/src/pai-relay:ro" -v "$out:/out" \
-		-v "pai-cargo-registry-$arch:/usr/local/cargo/registry" -v "pai-target-linux-$arch:/target" \
+		-v "pai-cargo-registry-$arch:/usr/local/cargo/registry" -v "pai-target-linux-$arch-$cache:/target" \
 		-e CARGO_TARGET_DIR=/target -e PAI_RELEASE_API_PINS \
 		-e PAI_RELEASE_RELAY_URL -e PAI_RELEASE_API_URL -e PAI_RELEASE_APP_URL -w /src/pai "$RUST_ALPINE" \
 		sh -euc "apk add --no-cache musl-dev >/dev/null
@@ -132,7 +160,7 @@ for target in x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
 	docker run --rm \
 		-v "$root:/src/pai:ro" -v "$relay:/src/pai-relay:ro" -v "$out:/out" \
 		-v pai-xwin-cache:/root/.cache/cargo-xwin -v pai-cargo-registry-xwin:/usr/local/cargo/registry \
-		-v pai-target-xwin:/target \
+		-v "pai-target-xwin-$cache:/target" \
 		-e CARGO_TARGET_DIR=/target -e PAI_RELEASE_API_PINS \
 		-e PAI_RELEASE_RELAY_URL -e PAI_RELEASE_API_URL -e PAI_RELEASE_APP_URL -e RUSTFLAGS="-C target-feature=+crt-static" -w /src/pai "$CARGO_XWIN" \
 		sh -euc "cargo xwin build --cross-compiler clang --release --locked --target $target
@@ -153,20 +181,21 @@ for bin in "$out"/pai-*; do
 		{ echo "build: $(basename "$bin") doesn't point at relay.$PAI_RELEASE_DOMAIN" >&2; exit 1; }
 done
 
-# Every binary must carry the release key in release/signing-key.pub, and no other Ed25519 key.
-# pai trusts an update only if it's signed by the key compiled into it, so a binary with any other
-# key can never update itself. 0.1.10's Linux and Windows binaries shipped with a test key because
-# Docker reused a cached build from a copy of this repo.
+# Every binary must carry exactly the two release keys, release/signing-key.pub and
+# release/backup-key.pub, and no other Ed25519 key. pai trusts an update only if it's signed by a key
+# compiled into it, so a binary with other keys may never update itself. 0.1.10's Linux and Windows
+# binaries shipped with a test key because Docker reused a cached build from a copy of this repo.
+want_keys="$(printf '%s\n%s\n' "$SPKI_B64" "$BACKUP_SPKI_B64" | sort)"
 for bin in "$out"/pai-*; do
 	keys="$(grep -ao 'MCowBQYDK2VwAyEA[A-Za-z0-9+/]\{43\}=' "$bin" | sort -u)"
-	[ "$keys" = "$SPKI_B64" ] || {
-		echo "build: $(basename "$bin") doesn't carry exactly the release key $KEY_ID from release/signing-key.pub. It carries:" >&2
+	[ "$keys" = "$want_keys" ] || {
+		echo "build: $(basename "$bin") doesn't carry exactly the release keys $KEY_ID and $BACKUP_KEY_ID. It carries:" >&2
 		printf '  %s\n' ${keys:-none} >&2
-		echo "A cached build is the likely cause. Run: docker volume rm pai-target-linux-aarch64 pai-target-linux-x86_64 pai-target-xwin, then build again." >&2
+		echo "A cached build is the likely cause. Run: docker volume rm pai-target-linux-aarch64-$cache pai-target-linux-x86_64-$cache pai-target-xwin-$cache, then build again." >&2
 		exit 1
 	}
 done
-echo "ok    every binary carries release key $KEY_ID"
+echo "ok    every binary carries release keys $KEY_ID and $BACKUP_KEY_ID, and no other"
 
 # What `pai update` reads first, to tell whether there's anything newer. Signed like every file.
 printf '%s\n' "$version" >"$out/VERSION"
@@ -190,6 +219,19 @@ echo "$SIGNING_NAMESPACE ssh-ed25519 $SSH_B64" >"$work/allowed_signers"
 ssh-keygen -Y verify -f "$work/allowed_signers" -I "$SIGNING_NAMESPACE" -n "$SIGNING_NAMESPACE" \
 	-s "$out/SHA256SUMS.$KEY_ID.sshsig" <"$out/SHA256SUMS"
 
+step "signing SHA256SUMS with the backup key $BACKUP_KEY_ID"
+SIGNING_KEY="$PAI_BACKUP_KEY"
+unset SIGNING_PASS
+[ -z "${BACKUP_PASS+set}" ] || SIGNING_PASS="$BACKUP_PASS"
+ed25519_sign "$out/SHA256SUMS" "$out/SHA256SUMS.$BACKUP_KEY_ID.sig"
+sshsig_sign "$out/SHA256SUMS" "$out/SHA256SUMS.$BACKUP_KEY_ID.sshsig" "$work/backup"
+unset SIGNING_PASS BACKUP_PASS
+printf -- '-----BEGIN PUBLIC KEY-----\n%s\n-----END PUBLIC KEY-----\n' "$BACKUP_SPKI_B64" >"$work/backup-key.pem"
+"$OPENSSL" pkeyutl -verify -pubin -inkey "$work/backup-key.pem" -rawin -in "$out/SHA256SUMS" -sigfile "$out/SHA256SUMS.$BACKUP_KEY_ID.sig"
+echo "$SIGNING_NAMESPACE ssh-ed25519 $BACKUP_SSH_B64" >"$work/backup_signers"
+ssh-keygen -Y verify -f "$work/backup_signers" -I "$SIGNING_NAMESPACE" -n "$SIGNING_NAMESPACE" \
+	-s "$out/SHA256SUMS.$BACKUP_KEY_ID.sshsig" <"$out/SHA256SUMS"
+
 if $handover; then
 	step "signing SHA256SUMS with the old key too, for pai up to 0.1.9"
 	SIGNING_KEY="$PAI_HANDOVER_KEY"
@@ -204,6 +246,26 @@ if $handover; then
 	ssh-keygen -Y verify -f "$work/old_signers" -I "$SIGNING_NAMESPACE" -n "$SIGNING_NAMESPACE" \
 		-s "$out/SHA256SUMS.sshsig" <"$out/SHA256SUMS"
 fi
+
+# Each binary checks the signed release itself, the way `pai update` will: every file against
+# SHA256SUMS, and the main key's and the backup key's signatures each with the keys compiled into it.
+# The macOS binaries run here (Intel under Rosetta), the Linux ones in a container. Windows binaries
+# can't run on a Mac, so the key check above is what covers them.
+step "every binary checks the signed release with both of its keys"
+want_ok="$(printf 'ok %s\nok %s' "$KEY_ID" "$BACKUP_KEY_ID")"
+check_ran() {
+	[ "$2" = "$want_ok" ] || { echo "build: $1 didn't accept both signatures. It said:" >&2; printf '%s\n' "$2" >&2; exit 1; }
+	echo "ok    $1"
+}
+[ "$(uname -m)" = arm64 ] || { echo "build: the release is built on an Apple silicon Mac, to run both macOS binaries" >&2; exit 1; }
+arch -x86_64 /usr/bin/true 2>/dev/null || { echo "build: Rosetta isn't installed, so the Intel macOS binary can't be checked. Run: softwareupdate --install-rosetta" >&2; exit 1; }
+check_ran pai-aarch64-apple-darwin "$("$out/pai-aarch64-apple-darwin" check-release "$out" 2>&1)" || exit 1
+check_ran pai-x86_64-apple-darwin "$(arch -x86_64 "$out/pai-x86_64-apple-darwin" check-release "$out" 2>&1)" || exit 1
+for arch in aarch64 x86_64; do
+	case "$arch" in aarch64) platform=linux/arm64 ;; x86_64) platform=linux/amd64 ;; esac
+	check_ran "pai-$arch-unknown-linux-musl" "$(docker run --rm --platform "$platform" -v "$out:/release:ro" "$RUST_ALPINE" \
+		"/release/pai-$arch-unknown-linux-musl" check-release /release 2>&1)" || exit 1
+done
 
 # A copy rather than a redirect, so latest/ works on any static host and the installers'
 # https-only redirect rule never comes into play.

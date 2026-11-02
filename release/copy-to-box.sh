@@ -18,7 +18,8 @@ box_opts=""
 [ -f "$box_key" ] && box_opts="-i $box_key -o IdentitiesOnly=yes"
 on_box() { ssh $box_opts "$box" "$@"; }
 
-key_id="$(sed -n "s/^SIGNING_KEY_ID='\(.*\)'$/\1/p" "$(dirname "$0")/../install.sh")"
+here="$(cd "$(dirname "$0")" && pwd)"
+key_id="$(sed -n "s/^SIGNING_KEY_ID='\(.*\)'$/\1/p" "$here/../install.sh")"
 [ -n "$key_id" ] || fail "install.sh has no SIGNING_KEY_ID"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -27,6 +28,15 @@ cd "$tmp"
 echo "== downloading $base/"
 # This key's signatures (its ID is in install.sh), and the old key's while the key changes.
 for f in VERSION SHA256SUMS "SHA256SUMS.$key_id.sig" "SHA256SUMS.$key_id.sshsig"; do
+  curl -fsSLo "$f" "$base/$f" || fail "couldn't download $f"
+done
+# The backup key's signatures (release/backup-key.pub), which pai 0.1.14 and later also accept.
+. "$here/signing.sh"
+find_openssl
+mkdir "$tmp/backup-key"
+key_material "$here/backup-key.pub" "$tmp/backup-key" || fail "release/backup-key.pub isn't an Ed25519 public key"
+rm -rf "$tmp/backup-key"
+for f in "SHA256SUMS.$KEY_ID.sig" "SHA256SUMS.$KEY_ID.sshsig"; do
   curl -fsSLo "$f" "$base/$f" || fail "couldn't download $f"
 done
 for f in SHA256SUMS.sig SHA256SUMS.sshsig; do

@@ -105,6 +105,33 @@ ssh-keygen -Y verify -f allowed_signers -I pai-release -n pai-release -s SHA256S
 
 Then check the file against `SHA256SUMS`: `shasum -a 256 -c SHA256SUMS --ignore-missing` (macOS), `sha256sum -c SHA256SUMS --ignore-missing` (Linux), or compare `Get-FileHash <file>` by eye (Windows).
 
+## The backup key
+
+From 0.1.14, pai has two release keys built in: the main key (`release/signing-key.pub`) and a backup key (`release/backup-key.pub`). `pai update` accepts a release whose `SHA256SUMS` carries a valid signature from either one, trying the main key's `SHA256SUMS.<id>.sig` first. So if one key is lost, or a release goes out with one signature wrong, installed copies still update. Each pai before 0.1.14 trusts one key only.
+
+Every release is signed with both keys: `release/build.sh` refuses to build without `PAI_BACKUP_KEY`. Keep the backup key under its own passphrase, not the main key's.
+
+Before anything is published, `release/build.sh` checks every binary it built:
+
+1. Each binary must contain exactly the two keys, and no other Ed25519 key. This catches a stale build. The 0.1.10 Linux and Windows binaries shipped with a throwaway test key, because Docker reused a cached build from a rehearsal on a copy of the repo. Those installs can't update and need the installer run once.
+2. Each binary that can run on the build Mac runs `pai check-release <dir>` on the signed release. That checks every file against `SHA256SUMS`, then checks the main key's signature and the backup key's signature separately, with the keys compiled into that binary. It must print `ok <main id>` and `ok <backup id>`. The macOS binaries run natively (Intel under Rosetta), and the Linux binaries run in a container. Windows binaries can't run on a Mac, so step 1 covers them.
+
+The installers check the main key's signature only.
+
+## Passphrases in the login keychain
+
+`release/build.sh` reads each key's passphrase from the Mac's login keychain when it's saved there, and asks only for the ones that aren't (decided 2026-11-02, to sign a release without typing). Save each once, in Terminal; `-w` with no value asks for the passphrase without echoing it:
+
+```sh
+security add-generic-password -s dawonai-pai-release -a pai-release-2026-10-27.key -w
+security add-generic-password -s dawonai-pai-release -a pai-release-backup-2026-11-02.key -w
+security add-generic-password -s dawonai-pai-release -a pai-release.key -w
+```
+
+The account is the key file's name. The first time `release/build.sh` reads an item, macOS asks whether `security` may read it; **Always Allow** stops the prompt.
+
+What this costs: the login keychain is unlocked whenever you're logged in, so any program running as your macOS user can read the passphrases once `security` is allowed, and with the key files it can sign a release that every installed pai accepts. That includes Claude Code sessions on this Mac. The items stay in the local login keychain, not iCloud Keychain. To go back to typing, delete them: `security delete-generic-password -s dawonai-pai-release -a <key file>`.
+
 ## Changing the key
 
 Every installed pai has the key it was built with, and checks each update against that key alone. Changing the key therefore takes one hand-over release, signed with both:
@@ -129,6 +156,8 @@ There's no way to revoke a key. If the key leaks, change it as above. If every c
 **2026-10-27:** the key with ID `52856a9eb2b9d05b` was retired after its passphrase was pasted into a chat. pai 0.1.10 is the hand-over release to the key with ID `f0a52c411efb5295`.
 
 **2026-10-30:** `release/handover-key.pub` is back, so every release is signed with both keys again until every installed pai is on 0.1.10 or later. Publish with `PAI_SIGNING_KEY` set to the new key and `PAI_HANDOVER_KEY` set to the old one.
+
+**2026-11-02:** pai 0.1.14 adds the backup key (above). From then on, publish with `PAI_BACKUP_KEY` set as well. With two keys built in, losing one is no longer the case above: sign with the other, and make a new second key in a later release.
 
 ## Publisher identity: macOS
 
