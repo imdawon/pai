@@ -80,6 +80,15 @@ export default async function dawonAi(pi: ExtensionAPI): Promise<void> {
         id: "qwen3.8-27b",
         name: "Qwen 3.8 27B (DawonAI)",
         reasoning: true,
+        // Qwen 3.8's chat template thinks at one of three depths and raises on any other. OMP
+        // sends the selected one in `chat_template_kwargs.reasoning_effort`; the model API maps
+        // it onto the template, and uses medium when a request names none.
+        thinking: { mode: "effort", efforts: ["low", "medium", "xhigh"], defaultLevel: "medium" },
+        compat: {
+          thinkingFormat: "qwen-chat-template",
+          supportsReasoningEffort: true,
+          qwenTemplateReasoningEffort: true,
+        },
         input: ["text"],
         // Billed by plan, not per token.
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
