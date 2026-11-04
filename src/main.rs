@@ -173,6 +173,9 @@ fn run(command: Command) -> Result<(), Error> {
             // than in the harness. The key isn't printed.
             app::token(&env)?;
             println!("Collected today's credential and started pai's proxy.\n");
+            for note in service::set_up_under_wsl(&env) {
+                println!("{note}");
+            }
             print_status(&env)?;
         }
         Command::Token => {

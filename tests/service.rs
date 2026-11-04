@@ -89,6 +89,42 @@ fn systemd_unit_goes_in_the_user_config_dir() {
 }
 
 #[test]
+fn without_systemd_install_says_how_to_turn_it_on_under_wsl() {
+    let mut t = TestEnv::with_config();
+    t.env.service_manager = Manager::Systemd;
+    t.env.vars.insert("XDG_CONFIG_HOME".into(), t.dir.path().join("xdg").to_string_lossy().into_owned());
+    t.env.vars.insert("PAI_TEST_NO_SYSTEMD".into(), "1".into());
+
+    let e = service::install(&t.env).unwrap_err().to_string();
+    assert!(e.contains("doesn't run systemd") && e.contains("pai token"), "{e}");
+    t.env.vars.insert("WSL_DISTRO_NAME".into(), "Ubuntu".into());
+    let e = service::install(&t.env).unwrap_err().to_string();
+    assert!(e.contains("systemd=true") && e.contains("/etc/wsl.conf") && e.contains("wsl --shutdown"), "{e}");
+    assert!(!service::installed(&t.env), "nothing is written");
+    assert!(t.env.commands.recorded().is_empty());
+
+    // `pai pair --setup` under WSL says the same, without failing.
+    let notes = service::set_up_under_wsl(&t.env);
+    assert!(notes.len() == 1 && notes[0].contains("systemd=true"), "{notes:?}");
+}
+
+#[test]
+fn pair_setup_installs_the_service_under_wsl_only() {
+    let mut t = TestEnv::with_config();
+    t.env.service_manager = Manager::Systemd;
+    t.env.vars.insert("XDG_CONFIG_HOME".into(), t.dir.path().join("xdg").to_string_lossy().into_owned());
+    assert!(service::set_up_under_wsl(&t.env).is_empty(), "plain Linux keeps `pai token` starting the proxy");
+    assert!(!service::installed(&t.env));
+
+    t.env.vars.insert("WSL_DISTRO_NAME".into(), "Ubuntu".into());
+    let notes = service::set_up_under_wsl(&t.env);
+    assert!(notes[0].starts_with("Wrote "), "{notes:?}");
+    assert!(service::installed(&t.env));
+    assert!(t.env.commands.recorded().contains(&"systemctl --user enable pai-proxy.service".to_string()));
+    assert!(service::set_up_under_wsl(&t.env).is_empty(), "once installed, it's left alone");
+}
+
+#[test]
 fn unsupported_os_says_what_to_do() {
     let mut t = TestEnv::with_config();
     t.env.service_manager = Manager::Unsupported;
