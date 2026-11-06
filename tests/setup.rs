@@ -512,7 +512,59 @@ fn other_prints_every_setting_and_writes_nothing() {
         }
         assert_eq!(out.contains("nothing was changed"), apply, "{out}");
         assert!(!out.contains("--undo"), "{out}");
+        assert!(out.contains(&setup::other_config(&target(&t, 131072), setup::ConfigFormat::ModelsJson)), "{out}");
     }
     assert!(!t.home().exists(), "writes nothing");
     assert!(setup::undo(&t.env, Tool::Other).unwrap().contains("Nothing to undo"));
+}
+
+#[test]
+fn other_config_files_carry_this_machines_values() {
+    let t = TestEnv::new();
+    let tg = target(&t, 131072);
+    let models: Value = serde_json::from_str(&setup::other_config(&tg, setup::ConfigFormat::ModelsJson)).unwrap();
+    let p = &models["providers"]["dawonai"];
+    assert_eq!(p["baseUrl"], "http://127.0.0.1:47821/v1");
+    assert_eq!(p["api"], "openai-completions");
+    assert_eq!(p["apiKey"], "!/opt/pai/bin/pai token");
+    let m = &p["models"][0];
+    assert_eq!(m["id"], "qwen3.8-27b");
+    assert_eq!(m["reasoning"], true);
+    assert_eq!(m["input"], serde_json::json!(["text", "image"]));
+    assert_eq!(m["contextWindow"], 131072);
+    assert_eq!(m["maxTokens"], 32000);
+
+    let openai: Value = serde_json::from_str(&setup::other_config(&tg, setup::ConfigFormat::Openai)).unwrap();
+    assert_eq!(openai["base_url"], "http://127.0.0.1:47821/v1");
+    assert_eq!(openai["models"][0]["max_output_tokens"], 32000);
+    let anthropic: Value = serde_json::from_str(&setup::other_config(&tg, setup::ConfigFormat::Anthropic)).unwrap();
+    assert_eq!(anthropic["base_url"], "http://127.0.0.1:47821");
+    assert_eq!(anthropic["api_key_header"], "x-api-key");
+    let claude: Value = serde_json::from_str(&setup::other_config(&tg, setup::ConfigFormat::ClaudeCode)).unwrap();
+    assert_eq!(claude["apiKeyHelper"], "/opt/pai/bin/pai token");
+
+    // A smaller context shrinks the output limit with it.
+    let small: Value = serde_json::from_str(&setup::other_config(&target(&t, 65536), setup::ConfigFormat::ModelsJson)).unwrap();
+    assert_eq!(small["providers"]["dawonai"]["models"][0]["maxTokens"], 16384);
+}
+
+#[test]
+fn other_out_writes_the_file_and_backs_up_what_was_there() {
+    let t = TestEnv::new();
+    let tg = target(&t, 131072);
+    let dir = t.home().join("harness");
+    let path = dir.join("models.json");
+    let out = setup::other_write(&t.env, &tg, setup::ConfigFormat::ModelsJson, &path).unwrap();
+    assert!(out.contains("Wrote"), "{out}");
+    assert_eq!(fs::read_to_string(&path).unwrap(), setup::other_config(&tg, setup::ConfigFormat::ModelsJson));
+    assert!(backups(&dir).is_empty());
+
+    let again = setup::other_write(&t.env, &tg, setup::ConfigFormat::ModelsJson, &path).unwrap();
+    assert!(again.contains("already has these settings"), "{again}");
+    assert!(backups(&dir).is_empty());
+
+    fs::write(&path, "{\"mine\":true}").unwrap();
+    let out = setup::other_write(&t.env, &tg, setup::ConfigFormat::Openai, &path).unwrap();
+    assert!(out.contains("Backed up"), "{out}");
+    assert_eq!(backups(&dir).len(), 1);
 }

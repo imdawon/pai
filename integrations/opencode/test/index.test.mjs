@@ -156,7 +156,7 @@ test("OpenCode 2: setup adds the dawonai provider and model", async (t) => {
   })
   const model = record.models.get("qwen3.8-27b")
   assert.equal(model.name, "Qwen 3.8 27B")
-  assert.deepEqual(model.capabilities, { tools: true, input: ["text"], output: ["text"] })
+  assert.deepEqual(model.capabilities, { tools: true, input: ["text", "image"], output: ["text"] })
   // No proxy answers in the test, so the number pai setup wrote is used.
   assert.deepEqual(model.limit, { context: 131072, output: 32768 })
 })

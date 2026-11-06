@@ -721,6 +721,7 @@ fn fetch_credential(env: &Env, config: &Config, offset: u32) -> Result<(String, 
         adult,
         day,
         blind_message: b64(pending.blind_message()),
+        shared: false,
     };
     let response = relay.credentials(&key, &config.device_id, &request)?;
     let blind_signature = unb64(&response.blind_signature)

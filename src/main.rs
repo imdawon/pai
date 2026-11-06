@@ -80,6 +80,12 @@ enum Command {
         /// Put the tool's config back as it was before --apply, and remove pai's files
         #[arg(long, conflicts_with = "apply")]
         undo: bool,
+        /// With `other`: print only a config file in this format
+        #[arg(long, value_enum, conflicts_with_all = ["apply", "undo"])]
+        format: Option<setup::ConfigFormat>,
+        /// With `other`: write the config file to this path (models-json unless --format says)
+        #[arg(long, value_name = "FILE", conflicts_with_all = ["apply", "undo"])]
+        out: Option<std::path::PathBuf>,
     },
     /// Install the latest signed pai release, if it's newer. Release builds also do this daily on
     /// their own; PAI_AUTO_UPDATE=0 turns that off.
@@ -167,8 +173,13 @@ fn run(command: Command) -> Result<(), Error> {
                 return Ok(());
             };
             println!();
-            let target = setup::Target::resolve(&env, app::plan_hint(&env));
-            print!("{}", setup::run(&env, tool, &target, true)?);
+            // A custom harness gets its config printed last, after the status, so it's on screen
+            // when the command finishes.
+            let custom = tool == Tool::Other;
+            if !custom {
+                let target = setup::Target::resolve(&env, app::plan_hint(&env));
+                print!("{}", setup::run(&env, tool, &target, true)?);
+            }
             // Collects today's credential and starts the proxy now, so a problem shows here rather
             // than in the harness. The key isn't printed.
             app::token(&env)?;
@@ -177,6 +188,12 @@ fn run(command: Command) -> Result<(), Error> {
                 println!("{note}");
             }
             print_status(&env)?;
+            if custom {
+                // Resolved after the first request, so the context window is the plan's.
+                let target = setup::Target::resolve(&env, app::plan_hint(&env));
+                println!();
+                print!("{}", setup::run(&env, tool, &target, false)?);
+            }
         }
         Command::Token => {
             let key = app::token(&env)?;
@@ -238,6 +255,21 @@ fn run(command: Command) -> Result<(), Error> {
             ServiceAction::Status => print!("{}", service::status(&env)),
         },
         Command::Setup { tool, undo: true, .. } => print!("{}", setup::undo(&env, tool)?),
+        Command::Setup { tool, format, out, .. } if format.is_some() || out.is_some() => {
+            if tool != Tool::Other {
+                return Err(Error::Setup(format!(
+                    "--format and --out are for `pai setup other`. Run `pai setup {} --apply` to set up {}.",
+                    tool.cli_name(),
+                    tool.display_name()
+                )));
+            }
+            let target = setup::Target::resolve(&env, app::plan_hint(&env));
+            let format = format.unwrap_or(setup::ConfigFormat::ModelsJson);
+            match out {
+                Some(path) => print!("{}", setup::other_write(&env, &target, format, &path)?),
+                None => print!("{}", setup::other_config(&target, format)),
+            }
+        }
         Command::Setup { tool, apply, .. } => {
             let target = setup::Target::resolve(&env, app::plan_hint(&env));
             print!("{}", setup::run(&env, tool, &target, apply)?);
