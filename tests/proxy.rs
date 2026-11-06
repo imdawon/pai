@@ -289,6 +289,18 @@ fn a_new_grants_time_replaces_a_pass_with_the_old_adult_setting() {
     assert!(!adult_of(1), "the request that brings the news still uses the old pass");
     settle(2);
     assert_eq!(relay.issued(), 2, "pai collected a pass with the new setting");
+    // The relay counts the pass when it signs it; pai stores it a moment later.
+    let held_adult = || {
+        let held = p._t.env.keystore.get(pai::keystore::CREDENTIAL).unwrap().unwrap();
+        pai_proto::Credential::decode(&held).unwrap().adult
+    };
+    for _ in 0..200 {
+        if held_adult() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(held_adult(), "pai holds the new pass");
 
     assert_eq!(p.post("/v1/messages", Some(&p.key), &[]).0, 200);
     assert!(adult_of(2), "the next request carries the adult bit");
@@ -566,4 +578,95 @@ fn reports_a_refusal_when_the_person_types_dawonai_report() {
     let (_, body) = p.send("/v1/responses", serde_json::json!({"input": "dawonai report"}));
     assert!(body.contains("report_sent"));
     assert_eq!(seen.lock().unwrap().reports.len(), 2);
+}
+
+/// A model API over TLS that answers every request with `reply(path)`, written as is, and then
+/// closes the connection without ending the reply properly, as a broken or dying server would.
+fn raw_gateway(reply: fn(&str) -> Vec<u8>) -> (u16, String, String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let ck = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let cert_pem = ck.cert.pem();
+    let pin = pai::pin::spki_pin(&CertificateDer::from(ck.cert.der().to_vec())).unwrap();
+    let cfg = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![CertificateDer::from(ck.cert.der().to_vec())],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(ck.key_pair.serialize_der())),
+        )
+        .unwrap();
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(cfg));
+    let std = StdListener::bind("127.0.0.1:0").unwrap();
+    let port = std.local_addr().unwrap().port();
+    std.set_nonblocking(true).unwrap();
+    std::thread::spawn(move || {
+        tokio::runtime::Runtime::new().unwrap().block_on(async move {
+            let listener = tokio::net::TcpListener::from_std(std).unwrap();
+            loop {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    let Ok(mut tls) = acceptor.accept(tcp).await else { return };
+                    let mut req = Vec::new();
+                    let mut buf = [0u8; 65536];
+                    while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match tls.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => req.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&req).to_string();
+                    let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    let _ = tls.write_all(&reply(&path)).await;
+                    let _ = tls.flush().await;
+                    // Dropped without close_notify or the last chunk: the reply breaks off here.
+                });
+            }
+        });
+    });
+    (port, cert_pem, pin)
+}
+
+#[test]
+fn a_reply_that_breaks_off_ends_with_the_apis_error_event() {
+    fn broken(_: &str) -> Vec<u8> {
+        let event = b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n";
+        let mut r = b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n".to_vec();
+        r.extend_from_slice(format!("{:x}\r\n", event.len()).as_bytes());
+        r.extend_from_slice(event);
+        r.extend_from_slice(b"\r\n");
+        // Half an event, then nothing: no blank line, no last chunk.
+        r.extend_from_slice(b"9\r\ndata: {\"t\r\n");
+        r
+    }
+    let (api_port, ca, pin) = raw_gateway(broken);
+    let (p, _relay) = start(api_port, &ca, &pin);
+    for (path, want) in [
+        ("/v1/messages", "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\""),
+        ("/v1/responses", "event: error\ndata: {\"type\":\"error\",\"code\":\"server_error\""),
+        ("/v1/chat/completions", "\n\ndata: {\"error\":{\"message\":"),
+    ] {
+        let r = p.http.post(format!("http://127.0.0.1:{}{path}", p.port)).header("x-api-key", &p.key).body("{}").send().unwrap();
+        assert_eq!(r.status(), 200);
+        let text = r.text().expect("the reply ends cleanly instead of dropping the connection");
+        assert!(text.starts_with("event: content_block_delta\n"), "{path}: {text}");
+        assert!(text.contains(want), "{path}: {text}");
+        assert!(text.contains("\"dawonai_error\":\"stream_interrupted\""), "{path}: {text}");
+        assert!(text.contains("data: {\"t\n\n"), "the half event is closed before the error: {path}: {text}");
+        assert!(text.ends_with("\n\n"), "{path}: {text}");
+    }
+}
+
+#[test]
+fn a_long_error_reply_is_passed_on_without_being_held() {
+    fn long_error(_: &str) -> Vec<u8> {
+        let body = format!(r#"{{"type":"error","error":{{"type":"x","message":"{}"}}}}"#, "a".repeat(3 << 20));
+        format!("HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}", body.len()).into_bytes()
+    }
+    let (api_port, ca, pin) = raw_gateway(long_error);
+    let (p, _relay) = start(api_port, &ca, &pin);
+    let r = p.http.post(format!("http://127.0.0.1:{}/v1/messages", p.port)).header("x-api-key", &p.key).body("{}").send().unwrap();
+    assert_eq!(r.status(), 400);
+    assert_eq!(r.bytes().unwrap().len(), (3 << 20) + 50, "all of it arrives");
 }

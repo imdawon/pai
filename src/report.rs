@@ -43,6 +43,11 @@ impl Held {
 /// texts is the command, in any case, with or without backticks. A harness may add its own text
 /// blocks to the same message (Claude Code's reminders), so any one text block counts.
 pub fn is_report_request(body: &[u8]) -> bool {
+    // Parsing a whole request costs many times its size when it holds many small messages, so
+    // only a request that has the command's text in it is parsed.
+    if !contains_ignore_case(body, COMMAND.as_bytes()) {
+        return false;
+    }
     let Ok(v) = serde_json::from_slice::<Value>(body) else { return false };
     let last = match (v.get("messages"), v.get("input")) {
         (Some(Value::Array(m)), _) => m.last(),
@@ -92,6 +97,10 @@ pub fn take_from_body(body: &[u8]) -> (Option<Vec<u8>>, Option<Value>) {
     (Some(v.to_string().into_bytes()), Some(report))
 }
 
+/// The most of one report comment pai holds while waiting for its blank line. A real one is a few
+/// kilobytes; past this, pai passes the bytes on instead of holding a stream that never ends it.
+pub const MAX_HELD_REPORT: usize = 1 << 20;
+
 /// Removes the report comment from a streamed response as it passes, keeping the report. A
 /// comment split across chunks is held until its blank line arrives, and a chunk that ends with
 /// what could be the start of one holds those few bytes until the next; everything else passes at
@@ -100,12 +109,14 @@ pub struct SseFilter {
     held: Vec<u8>,
     /// Whether the next byte out starts a line.
     line_start: bool,
+    /// The last two bytes out, to tell whether an event is open.
+    last: [u8; 2],
     pub report: Option<Value>,
 }
 
 impl Default for SseFilter {
     fn default() -> Self {
-        SseFilter { held: Vec::new(), line_start: true, report: None }
+        SseFilter { held: Vec::new(), line_start: true, last: *b"\n\n", report: None }
     }
 }
 
@@ -120,7 +131,13 @@ impl SseFilter {
             match found {
                 Some(at) => {
                     let Some(end) = find(&self.held[at..], b"\n\n") else {
-                        self.emit(at, &mut out);
+                        if self.held.len() - at > MAX_HELD_REPORT {
+                            // Not a report pai can use: pass it on rather than hold it forever.
+                            let n = self.held.len();
+                            self.emit(n, &mut out);
+                        } else {
+                            self.emit(at, &mut out);
+                        }
                         return out;
                     };
                     if let Ok(v) = serde_json::from_slice::<Value>(&self.held[at + SSE_PREFIX.len()..at + end]) {
@@ -148,13 +165,31 @@ impl SseFilter {
     fn emit(&mut self, n: usize, out: &mut Vec<u8>) {
         if n > 0 {
             self.line_start = self.held[n - 1] == b'\n';
+            self.last = [if n > 1 { self.held[n - 2] } else { self.last[1] }, self.held[n - 1]];
             out.extend(self.held.drain(..n));
         }
     }
 
     /// Whatever is still held when the stream ends.
     pub fn finish(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.held)
+        let mut out = Vec::new();
+        let n = self.held.len();
+        self.emit(n, &mut out);
+        out
+    }
+
+    /// Ends a stream that broke off with `event`, an error event. Whatever is held goes first, and
+    /// a blank line closes an event left open, so the error arrives as an event of its own.
+    pub fn fail(&mut self, event: &[u8]) -> Vec<u8> {
+        let mut out = self.finish();
+        if self.last != *b"\n\n" {
+            out.extend_from_slice(if self.last[1] == b'\n' { b"\n" } else { b"\n\n" });
+        }
+        out.extend_from_slice(event);
+        self.held.clear();
+        self.last = *b"\n\n";
+        self.line_start = true;
+        out
     }
 }
 
@@ -164,6 +199,10 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
 
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
     find(hay, needle).is_some()
+}
+
+fn contains_ignore_case(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle))
 }
 
 #[cfg(test)]
@@ -203,6 +242,46 @@ mod tests {
         let rest: Value = serde_json::from_slice(&rest.unwrap()).unwrap();
         assert_eq!(rest, json!({"type": "error", "error": {"type": "refused", "message": "m"}}));
         assert_eq!(take_from_body(br#"{"error":{}}"#), (None, None));
+    }
+
+    #[test]
+    fn passes_on_a_report_comment_that_never_ends() {
+        let mut f = SseFilter::default();
+        let mut out = f.push(b"data: a\n\n: dawonai-report {");
+        assert_eq!(out, b"data: a\n\n", "held while it may still end");
+        let chunk = vec![b'x'; 64 * 1024];
+        for _ in 0..(MAX_HELD_REPORT / chunk.len() + 2) {
+            out.extend(f.push(&chunk));
+        }
+        assert!(f.held.len() < chunk.len() + 64, "it stops holding past the limit: {}", f.held.len());
+        out.extend(f.finish());
+        assert!(out.starts_with(b"data: a\n\n: dawonai-report {xxx"));
+        assert!(f.report.is_none());
+    }
+
+    #[test]
+    fn a_failed_stream_ends_with_its_own_event() {
+        let event = b"event: error\ndata: {}\n\n";
+        let mut f = SseFilter::default();
+        f.push(b"data: a\n\n");
+        assert_eq!(f.fail(event), event.to_vec(), "between events, the event alone");
+        let mut f = SseFilter::default();
+        f.push(b"data: a\n");
+        assert_eq!(f.fail(event), b"\nevent: error\ndata: {}\n\n".to_vec(), "an open event is closed first");
+        let mut f = SseFilter::default();
+        f.push(b"data: a");
+        assert_eq!(f.fail(event), b"\n\nevent: error\ndata: {}\n\n".to_vec());
+        let mut f = SseFilter::default();
+        assert_eq!(f.push(b"data: a\n\n:"), b"data: a\n\n");
+        assert_eq!(f.fail(event), b":\n\nevent: error\ndata: {}\n\n".to_vec(), "what was held goes first");
+    }
+
+    #[test]
+    fn a_big_request_without_the_command_isnt_parsed() {
+        // Unparseable, so a parse would say no too; this checks the text check says no first, and
+        // that it finds the command in any case.
+        assert!(!is_report_request(&[b'['; 1 << 20]));
+        assert!(is_report_request(br#"{"messages":[{"role":"user","content":"DawonAI Report"}]}"#));
     }
 
     #[test]

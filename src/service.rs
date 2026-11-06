@@ -125,6 +125,43 @@ fn unsupported() -> Error {
     )
 }
 
+/// Whether this Linux runs under Windows Subsystem for Linux. WSL sets `WSL_DISTRO_NAME` in its
+/// shells, and its kernel names Microsoft in its release string.
+pub fn wsl(env: &Env) -> bool {
+    if env.var("WSL_DISTRO_NAME").is_some() {
+        return true;
+    }
+    matches!(env.commands, Commands::System)
+        && cfg!(target_os = "linux")
+        && fs::read_to_string("/proc/sys/kernel/osrelease").is_ok_and(|r| r.to_ascii_lowercase().contains("microsoft"))
+}
+
+/// Whether systemd runs this Linux, the check systemd's own tools use. WSL leaves it off unless
+/// `/etc/wsl.conf` turns it on. Tests say no with `PAI_TEST_NO_SYSTEMD=1`.
+pub fn systemd_running(env: &Env) -> bool {
+    match env.commands {
+        Commands::System => std::path::Path::new("/run/systemd/system").is_dir(),
+        Commands::Record(_) => env.var("PAI_TEST_NO_SYSTEMD") != Some("1"),
+    }
+}
+
+/// How to turn systemd on under WSL, for `pai service install` and `pai pair --setup`.
+pub const WSL_SYSTEMD_HOWTO: &str = "WSL has systemd turned off, and pai's login service needs it. To turn it on, run \
+     `printf '[boot]\\nsystemd=true\\n' | sudo tee -a /etc/wsl.conf` here, then `wsl --shutdown` in PowerShell, \
+     then open WSL again and run `pai service install`. Until then, your harness starts pai's proxy itself";
+
+fn no_systemd(env: &Env) -> Error {
+    if wsl(env) {
+        Error::Setup(WSL_SYSTEMD_HOWTO.into())
+    } else {
+        Error::Setup(
+            "this Linux doesn't run systemd, so pai can't install its login service here. \
+             Run `pai token` once after you log in to start the proxy, or set the tool up with `pai token` as its key command"
+                .into(),
+        )
+    }
+}
+
 /// Where the service file goes. Under `Paths.home`, so tests keep it in a temp dir.
 pub fn file(env: &Env) -> Option<PathBuf> {
     match env.service_manager {
@@ -241,6 +278,9 @@ fn wait_for_proxy(env: &Env) -> bool {
 /// Installs the service and starts it, replacing a proxy `pai token` started. Safe to run again.
 pub fn install(env: &Env) -> Result<Vec<String>> {
     let path = file(env).ok_or_else(unsupported)?;
+    if env.service_manager == Manager::Systemd && !systemd_running(env) {
+        return Err(no_systemd(env));
+    }
     let config = env.paired()?;
     crate::proxy::upstream_client(env, &config)?;
     let key = app::local_key(env)?;
@@ -294,6 +334,22 @@ pub fn install(env: &Env) -> Result<Vec<String>> {
         Commands::Record(_) => notes.push(format!("The proxy will run at {url}, and start when you log in.")),
     }
     Ok(notes)
+}
+
+/// Under WSL, `pai pair --setup` also installs the login service, so systemd restarts the proxy
+/// if it stops and keeps what it prints in the journal (`journalctl --user -u pai-proxy`). Returns
+/// what to tell the person; nothing when this isn't WSL or the service is already there.
+pub fn set_up_under_wsl(env: &Env) -> Vec<String> {
+    if !wsl(env) || env.service_manager != Manager::Systemd || installed(env) {
+        return Vec::new();
+    }
+    if !systemd_running(env) {
+        return vec![format!("{WSL_SYSTEMD_HOWTO}.")];
+    }
+    match install(env) {
+        Ok(notes) => notes,
+        Err(e) => vec![format!("Couldn't install pai's login service ({e}). Run `pai service install` to try again.")],
+    }
 }
 
 pub fn uninstall(env: &Env) -> Result<Vec<String>> {

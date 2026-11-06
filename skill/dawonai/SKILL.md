@@ -32,7 +32,7 @@ The DawonAI web app gives the user one command for their terminal that does all 
 
 Skip this if `pai --version` already works.
 
-macOS and Linux:
+macOS, Linux, and Windows Subsystem for Linux (run it inside WSL when the harness runs there):
 
 ```sh
 curl -fsSL https://privacyai.example/pai/install.sh -o /tmp/pai-install.sh && sh /tmp/pai-install.sh
