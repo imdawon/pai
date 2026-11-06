@@ -21,8 +21,21 @@ pub enum Tool {
     Opencode,
     Omp,
     Hermes,
-    /// Any other harness: prints the settings to copy in, and writes nothing.
+    /// Any other harness: prints the settings to copy in, or a config file with --format or --out.
     Other,
+}
+
+/// The config file formats `pai setup other --format` prints and `--out` writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ConfigFormat {
+    /// The models.json of OMP, pi and harnesses like them
+    ModelsJson,
+    /// An OpenAI API provider: Chat Completions and Responses
+    Openai,
+    /// An Anthropic API provider: Messages
+    Anthropic,
+    /// Claude Code's settings.json
+    ClaudeCode,
 }
 
 /// What every tool's config is built from.
@@ -947,6 +960,68 @@ fn hermes_apply(env: &Env, t: &Target) -> Result<String> {
     Ok(log)
 }
 
+/// A config file for a harness pai doesn't set up, in `format`, with this machine's values. The
+/// model thinks, and takes text and inline images (pai-gateway src/chat.rs, check_media).
+pub fn other_config(t: &Target, format: ConfigFormat) -> String {
+    let key_command = format!("{} token", shell_word(&t.pai_bin));
+    let input = json!(["text", "image"]);
+    let v = match format {
+        ConfigFormat::ModelsJson => json!({
+            "providers": { PROVIDER_ID: {
+                "baseUrl": format!("{}/v1", t.base_url),
+                "api": "openai-completions",
+                "apiKey": format!("!{key_command}"),
+                "models": [{
+                    "id": MODEL,
+                    "name": "DawonAI",
+                    "reasoning": true,
+                    "input": input,
+                    // Billed by plan, not per token.
+                    "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+                    "contextWindow": t.context,
+                    "maxTokens": t.max_output(),
+                }],
+            }},
+        }),
+        ConfigFormat::Openai => json!({
+            "provider": PROVIDER_ID,
+            "api": "openai",
+            "base_url": format!("{}/v1", t.base_url),
+            "endpoints": ["/v1/chat/completions", "/v1/responses"],
+            "api_key_command": key_command,
+            "models": [{
+                "id": MODEL, "object": "model", "name": "DawonAI", "reasoning": true, "input": input,
+                "context_window": t.context, "max_output_tokens": t.max_output(),
+            }],
+        }),
+        ConfigFormat::Anthropic => json!({
+            "provider": PROVIDER_ID,
+            "api": "anthropic",
+            "base_url": t.base_url,
+            "endpoints": ["/v1/messages"],
+            "api_key_command": key_command,
+            "api_key_header": "x-api-key",
+            "models": [{
+                "type": "model", "id": MODEL, "display_name": "DawonAI", "reasoning": true, "input": input,
+                "context_window": t.context, "max_tokens": t.max_output(),
+            }],
+        }),
+        ConfigFormat::ClaudeCode => claude_settings(t),
+    };
+    pretty(&v)
+}
+
+/// Writes `other_config` to `path`, backing up a file that's already there. pai doesn't keep track
+/// of it: run the command again if the context limit changes.
+pub fn other_write(env: &Env, t: &Target, format: ConfigFormat, path: &Path) -> Result<String> {
+    let mut log = String::new();
+    write_file(path, &other_config(t, format), env.clock.now(), &mut log)?;
+    if log.is_empty() {
+        log = format!("{} already has these settings.\n", path.display());
+    }
+    Ok(log)
+}
+
 /// For harnesses pai doesn't know: every value the others are set up with, to copy by hand.
 fn other_print(t: &Target, apply: bool) -> String {
     let key_help = if cfg!(windows) {
@@ -965,7 +1040,9 @@ fn other_print(t: &Target, apply: bool) -> String {
          Max output          {} tokens\n\
          API key command     {} token\n\n\
          {key_help}\n\
-         That key only works on this computer, through pai.\n",
+         That key only works on this computer, through pai.\n\n\
+         For a config file: `pai setup other --format <models-json|openai|anthropic|claude-code>` prints one,\n\
+         and `--out <file>` writes it there.\n",
         if apply { "pai doesn't write config for this harness, so nothing was changed.\n\n" } else { "" },
         t.context,
         t.max_output(),
