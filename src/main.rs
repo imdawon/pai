@@ -173,13 +173,24 @@ fn run(command: Command) -> Result<(), Error> {
                 return Ok(());
             };
             println!();
-            let target = setup::Target::resolve(&env, app::plan_hint(&env));
-            print!("{}", setup::run(&env, tool, &target, true)?);
+            // A custom harness gets its config printed last, after the status, so it's on screen
+            // when the command finishes.
+            let custom = tool == Tool::Other;
+            if !custom {
+                let target = setup::Target::resolve(&env, app::plan_hint(&env));
+                print!("{}", setup::run(&env, tool, &target, true)?);
+            }
             // Collects today's credential and starts the proxy now, so a problem shows here rather
             // than in the harness. The key isn't printed.
             app::token(&env)?;
             println!("Collected today's credential and started pai's proxy.\n");
             print_status(&env)?;
+            if custom {
+                // Resolved after the first request, so the context window is the plan's.
+                let target = setup::Target::resolve(&env, app::plan_hint(&env));
+                println!();
+                print!("{}", setup::run(&env, tool, &target, false)?);
+            }
         }
         Command::Token => {
             let key = app::token(&env)?;

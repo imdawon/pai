@@ -1,6 +1,6 @@
 [package]
 name = "pai"
-version = "0.1.17"
+version = "0.1.18"
 edition = "2024"
 description = "Gives coding tools a DawonAI day credential without a long-lived API key"
 license = "MIT"
