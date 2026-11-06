@@ -203,7 +203,7 @@ export const DawonAISetup: PluginV2.Plugin["setup"] = async (ctx) => {
     })
     providers.models.update(PROVIDER_ID, MODEL_ID, (model) => {
       if (!model.name || model.name === MODEL_ID) model.name = "Qwen 3.8 27B"
-      model.capabilities = { ...model.capabilities, tools: true, input: ["text"], output: ["text"] }
+      model.capabilities = { ...model.capabilities, tools: true, input: ["text", "image"], output: ["text"] }
       model.limit = { ...model.limit, ...limits(context) }
     })
   })
