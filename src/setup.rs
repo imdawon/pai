@@ -1041,12 +1041,14 @@ fn other_print(t: &Target, apply: bool) -> String {
          API key command     {} token\n\n\
          {key_help}\n\
          That key only works on this computer, through pai.\n\n\
-         For a config file: `pai setup other --format <models-json|openai|anthropic|claude-code>` prints one,\n\
-         and `--out <file>` writes it there.\n",
+         Config for your harness, in the models.json format of OMP, pi and harnesses like them:\n\n\
+         {}\n\
+         Other formats: `pai setup other --format <openai|anthropic|claude-code>`. `--out <file>` writes one to a file.\n",
         if apply { "pai doesn't write config for this harness, so nothing was changed.\n\n" } else { "" },
         t.context,
         t.max_output(),
         shell_word(&t.pai_bin),
+        other_config(t, ConfigFormat::ModelsJson),
         base = t.base_url,
     )
 }

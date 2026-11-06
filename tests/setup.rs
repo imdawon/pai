@@ -512,6 +512,7 @@ fn other_prints_every_setting_and_writes_nothing() {
         }
         assert_eq!(out.contains("nothing was changed"), apply, "{out}");
         assert!(!out.contains("--undo"), "{out}");
+        assert!(out.contains(&setup::other_config(&target(&t, 131072), setup::ConfigFormat::ModelsJson)), "{out}");
     }
     assert!(!t.home().exists(), "writes nothing");
     assert!(setup::undo(&t.env, Tool::Other).unwrap().contains("Nothing to undo"));
