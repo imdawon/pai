@@ -80,6 +80,12 @@ enum Command {
         /// Put the tool's config back as it was before --apply, and remove pai's files
         #[arg(long, conflicts_with = "apply")]
         undo: bool,
+        /// With `other`: print only a config file in this format
+        #[arg(long, value_enum, conflicts_with_all = ["apply", "undo"])]
+        format: Option<setup::ConfigFormat>,
+        /// With `other`: write the config file to this path (models-json unless --format says)
+        #[arg(long, value_name = "FILE", conflicts_with_all = ["apply", "undo"])]
+        out: Option<std::path::PathBuf>,
     },
     /// Install the latest signed pai release, if it's newer. Release builds also do this daily on
     /// their own; PAI_AUTO_UPDATE=0 turns that off.
@@ -235,6 +241,21 @@ fn run(command: Command) -> Result<(), Error> {
             ServiceAction::Status => print!("{}", service::status(&env)),
         },
         Command::Setup { tool, undo: true, .. } => print!("{}", setup::undo(&env, tool)?),
+        Command::Setup { tool, format, out, .. } if format.is_some() || out.is_some() => {
+            if tool != Tool::Other {
+                return Err(Error::Setup(format!(
+                    "--format and --out are for `pai setup other`. Run `pai setup {} --apply` to set up {}.",
+                    tool.cli_name(),
+                    tool.display_name()
+                )));
+            }
+            let target = setup::Target::resolve(&env, app::plan_hint(&env));
+            let format = format.unwrap_or(setup::ConfigFormat::ModelsJson);
+            match out {
+                Some(path) => print!("{}", setup::other_write(&env, &target, format, &path)?),
+                None => print!("{}", setup::other_config(&target, format)),
+            }
+        }
         Command::Setup { tool, apply, .. } => {
             let target = setup::Target::resolve(&env, app::plan_hint(&env));
             print!("{}", setup::run(&env, tool, &target, apply)?);
