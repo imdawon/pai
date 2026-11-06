@@ -17,7 +17,7 @@ root="$(pwd)"
 export PATH="$HOME/.cargo/bin:$PATH"
 
 # Pinned so a release can be rebuilt with the same compilers.
-RUST_ALPINE="rust:1.95-alpine"
+RUST_ALPINE="docker.io/library/rust:1.95-alpine@sha256:606fd313a0f49743ee2a7bd49a0914bab7deedb12791f3a846a34a4711db7ed2"
 CARGO_XWIN="ghcr.io/rust-cross/cargo-xwin@sha256:9856b895265d4966f212228ba64802cf89337e2a2a537aa2533c1b8784cbc81b"
 
 # The domain this release talks to: pai pairs with relay.<domain> and sends requests to
