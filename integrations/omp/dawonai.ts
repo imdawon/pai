@@ -80,7 +80,7 @@ export default async function dawonAi(pi: ExtensionAPI): Promise<void> {
         id: "qwen3.8-27b",
         name: "Qwen 3.8 27B (DawonAI)",
         reasoning: true,
-        input: ["text"],
+        input: ["text", "image"],
         // Billed by plan, not per token.
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: context,

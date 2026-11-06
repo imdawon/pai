@@ -234,6 +234,7 @@ fn handle(
                 adult: s.adult,
                 beta: false,
                 rotate: s.rotate,
+                pass_key: None,
             })
         }
         ("GET", "/v1/keys") => ok(IssuerKeys {
