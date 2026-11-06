@@ -28,6 +28,10 @@ jobs:
           # read-only token set once as a user-level Actions secret.
           [ -n "$READ_TOKEN" ] || { echo "FORGE_READ_TOKEN isn't set (pai-gateway deploy/forge/README.md)" >&2; exit 1; }
           get pai-relay "$GITHUB_REPOSITORY_OWNER/pai-relay" "$READ_TOKEN" refs/heads/master
+      # Every action, image and toolchain is pinned to a commit or digest (tools/check-pins.sh).
+      - name: Pinned actions, images and toolchains
+        working-directory: pai
+        run: bash tools/check-pins.sh
       - name: Tests
         working-directory: pai
         run: cargo test --locked
