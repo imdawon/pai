@@ -191,6 +191,7 @@ impl Drop for InFlight {
 
 /// Runs the proxy until it's told to stop. Returns at once if another proxy already has the port.
 pub fn run(env: Env) -> Result<()> {
+    raise_file_limit();
     let config = env.config()?.ok_or(Error::NotPaired)?;
     let local_key = app::local_key(&env)?;
     let fingerprint = fingerprint(&config, &app::trust(&env, Some(&config)));
@@ -753,51 +754,137 @@ async fn forward(p: Arc<Proxy>, req: Request) -> Response {
         if !may_retry {
             // A refusal carries its flagged piece for `dawonai report`; the harness never sees it.
             if status == StatusCode::BAD_REQUEST {
-                let text = resp.bytes().await.unwrap_or_default();
+                let (text, rest) = read_capped(resp).await;
+                let mut headers = resp_headers.clone();
+                headers.remove(header::CONTENT_LENGTH);
+                if rest.is_some() {
+                    return hold(respond(status, &headers, capped_body(text, rest)), slot);
+                }
                 let (stripped, held) = report::take_from_body(&text);
                 if let Some(payload) = held {
                     *p.report.lock().unwrap() = Some(report::Held { payload, sent: None });
                 }
                 let body = stripped.map_or_else(|| Body::from(text), Body::from);
-                let mut headers = resp_headers.clone();
-                headers.remove(header::CONTENT_LENGTH);
                 return hold(respond(status, &headers, body), slot);
             }
+            // A streamed reply that breaks off ends with the API's own error event, so the harness
+            // shows an error instead of a dropped connection. Other replies just stop.
+            let event_stream = resp_headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|t| t.trim_start().to_ascii_lowercase().starts_with("text/event-stream"));
+            let broken_off = event_stream.then(|| stream_error_event(parts.uri.path()));
             let filter = Arc::new(Mutex::new(report::SseFilter::default()));
             let (keep, last) = (p.clone(), filter.clone());
             let stream = resp
                 .bytes_stream()
-                .map_err(std::io::Error::other)
-                .map_ok(move |chunk| {
+                .map(move |chunk| {
                     let mut f = filter.lock().unwrap();
+                    let chunk = match (chunk, &broken_off) {
+                        (Ok(c), _) => c,
+                        (Err(_), Some(event)) => return Ok(Bytes::from(f.fail(event))),
+                        (Err(e), None) => return Err(std::io::Error::other(e)),
+                    };
                     let out = Bytes::from(f.push(&chunk));
                     if let Some(payload) = f.report.take() {
                         *keep.report.lock().unwrap() = Some(report::Held { payload, sent: None });
                     }
-                    out
+                    Ok(out)
                 })
                 .chain(futures_util::stream::once(async move { Ok(Bytes::from(last.lock().unwrap().finish())) }));
             let mut headers = resp_headers.clone();
             headers.remove(header::CONTENT_LENGTH);
             return hold(respond(status, &headers, Body::from_stream(stream)), slot);
         }
-        let text = resp.bytes().await.unwrap_or_default();
-        let kind = String::from_utf8_lossy(&text);
+        let (text, rest) = read_capped(resp).await;
+        let kind = String::from_utf8_lossy(&text).into_owned();
         if status == StatusCode::UNAUTHORIZED && kind.contains("invalid_credential") {
             (refresh, refreshed) = (true, true);
             continue;
         }
         if status == StatusCode::UNAUTHORIZED {
-            return hold(respond(status, &resp_headers, Body::from(text)), slot);
+            return hold(respond(status, &resp_headers, capped_body(text, rest)), slot);
         }
         // A refusal the safety check gave on purpose won't change: pass it on.
         if kind.contains("safety_unavailable") && status == StatusCode::SERVICE_UNAVAILABLE && attempts > 0 {
-            return hold(respond(status, &resp_headers, Body::from(text)), slot);
+            return hold(respond(status, &resp_headers, capped_body(text, rest)), slot);
         }
         tokio::time::sleep(retry_after(&resp_headers).max(backoff(attempts, first))).await;
         attempts += 1;
     }
 }
+
+/// The most of an error reply pai reads into memory, to look at its kind and take out a report.
+/// Real ones are well under a kilobyte; the rest of a longer one is passed on as it arrives.
+const MAX_ERROR_BODY: usize = 1 << 20;
+
+/// Reads a reply up to `MAX_ERROR_BODY`. When there's more, returns the reply too, for the rest.
+async fn read_capped(mut resp: reqwest::Response) -> (Bytes, Option<reqwest::Response>) {
+    let mut read = Vec::new();
+    loop {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                read.extend_from_slice(&chunk);
+                if read.len() > MAX_ERROR_BODY {
+                    return (read.into(), Some(resp));
+                }
+            }
+            _ => return (read.into(), None),
+        }
+    }
+}
+
+/// The body for a reply `read_capped` read: what it read, then the rest as it arrives.
+fn capped_body(read: Bytes, rest: Option<reqwest::Response>) -> Body {
+    match rest {
+        None => Body::from(read),
+        Some(rest) => Body::from_stream(futures_util::stream::once(async move { Ok(read) }).chain(rest.bytes_stream().map_err(std::io::Error::other))),
+    }
+}
+
+/// The error event that ends a streamed reply the model server broke off, in the shape of the API
+/// the harness called: Anthropic's `error` event, the Responses API's `error` event, or the error
+/// object Chat Completions streams send. pai's own name for it goes beside, as `dawonai_error`.
+fn stream_error_event(path: &str) -> Vec<u8> {
+    const MESSAGE: &str = "DawonAI's model server stopped sending this reply before it finished. Try again.";
+    let (event, data) = if path.starts_with("/v1/messages") {
+        (Some("error"), json!({"type": "error", "error": {"type": "api_error", "message": MESSAGE}, KIND_FIELD: "stream_interrupted"}))
+    } else if path.starts_with("/v1/responses") {
+        (Some("error"), json!({"type": "error", "code": "server_error", "message": MESSAGE, "param": null, KIND_FIELD: "stream_interrupted"}))
+    } else {
+        (None, json!({"error": {"message": MESSAGE, "type": "server_error", "param": null, "code": null}, KIND_FIELD: "stream_interrupted"}))
+    };
+    match event {
+        Some(e) => format!("event: {e}\ndata: {data}\n\n").into_bytes(),
+        None => format!("data: {data}\n\n").into_bytes(),
+    }
+}
+
+/// Raises the open-file limit to the most the system allows. Each waiting request holds a
+/// connection, and Linux's usual soft limit of 1,024 left the proxy unable to accept any more,
+/// its health check included, until some closed.
+#[cfg(unix)]
+fn raise_file_limit() {
+    // SAFETY: getrlimit and setrlimit only read and write the struct passed to them.
+    unsafe {
+        let mut limit: libc::rlimit = std::mem::zeroed();
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 || limit.rlim_cur >= limit.rlim_max {
+            return;
+        }
+        let mut want = limit.rlim_max;
+        // macOS refuses a soft limit above OPEN_MAX, even when the hard limit is unlimited.
+        if cfg!(target_os = "macos") {
+            want = want.min(10240);
+        }
+        if want > limit.rlim_cur {
+            limit.rlim_cur = want;
+            libc::setrlimit(libc::RLIMIT_NOFILE, &limit);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn raise_file_limit() {}
 
 /// Answers `dawonai report`: sends the latest refusal's flagged piece to the model API with the
 /// day pass, and tells the harness so in an error, the way it showed the refusal.
