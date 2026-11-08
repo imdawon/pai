@@ -838,7 +838,7 @@ fn open_left(
 }
 
 /// How many times pai looks for the pass another device is collecting, waiting 2 s, then 4 s, and
-/// so on: about 30 seconds in all, as the web app does. privacy-ai docs/SETTINGS.md.
+/// so on: about 20 seconds in all, as the web app does. privacy-ai docs/SETTINGS.md.
 const SHARED_TRIES: u64 = 5;
 
 /// One day pass per account (privacy-ai docs/PROTOCOL.md, "Shared day passes"): open the pass
