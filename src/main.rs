@@ -109,6 +109,10 @@ enum Command {
     // release key built into this binary. Hidden: not for users.
     #[command(hide = true)]
     CheckRelease { dir: std::path::PathBuf },
+    // The child process that calls the Secure Enclave for the sealed secrets file (src/sealed.rs),
+    // so a crash or hang there takes down only this process. Hidden: run by pai itself.
+    #[command(hide = true)]
+    KeystoreHelper { op: String },
 }
 
 #[derive(Subcommand)]
@@ -138,6 +142,9 @@ fn main() -> ExitCode {
 }
 
 fn run(command: Command) -> Result<(), Error> {
+    if let Command::KeystoreHelper { op } = &command {
+        return pai::sealed::run_helper(op);
+    }
     let env = Env::from_process()?;
     let config = env.config().ok().flatten();
     if let Some(warning) = app::test_mode_warning(&app::trust(&env, config.as_ref())) {
@@ -252,6 +259,7 @@ fn run(command: Command) -> Result<(), Error> {
                 Err(e) => return Err(e),
             }
         }
+        Command::KeystoreHelper { op } => pai::sealed::run_helper(&op)?,
         Command::CheckRelease { dir } => {
             for id in pai::update::check_release(&env, &dir)? {
                 println!("ok {id}");

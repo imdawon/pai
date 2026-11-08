@@ -63,7 +63,13 @@ impl Env {
             .map(|s| s.trim().to_ascii_lowercase())
             .as_deref()
         {
-            None | Some("") | Some("file") => Keystore::File(paths.secrets_file.clone()),
+            // Sealed by the Secure Enclave or DPAPI where the computer has one; `file` keeps the
+            // plain 0600 file, for a Mac whose enclave misbehaves.
+            None | Some("") => match crate::sealed::available(&paths.secrets_file) {
+                Some(kind) => Keystore::Sealed(paths.secrets_file.clone(), kind),
+                None => Keystore::File(paths.secrets_file.clone()),
+            },
+            Some("file") => Keystore::File(paths.secrets_file.clone()),
             Some(other) => {
                 return Err(Error::Io(format!(
                     "PAI_KEYSTORE={other} is not supported: pai keeps its secrets in {}",
@@ -818,6 +824,7 @@ fn collect(
 /// The pass another of the account's devices left with the relay for this plan and period,
 /// opened with the pass key and checked against the issuer key. None if there's none, or it
 /// doesn't open (sealed with another pass key).
+#[allow(clippy::too_many_arguments)]
 fn open_left(
     relay: &Relay,
     key: &SigningKey,

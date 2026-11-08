@@ -204,7 +204,7 @@ fn windows_install_adds_a_run_key_entry_and_removes_it() {
     let notes = service::install(&t.env).unwrap();
     assert!(notes[0].contains("DawonAI pai proxy"), "{notes:?}");
     let add = format!(r"reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v DawonAI pai proxy /t REG_SZ /d {command} /f");
-    assert_eq!(t.env.commands.recorded(), [add.clone()]);
+    assert_eq!(t.env.commands.recorded(), std::slice::from_ref(&add));
     assert!(service::installed(&t.env));
     assert!(service::describe(&t.env).starts_with("installed, starts at login"), "{}", service::describe(&t.env));
     assert!(!service::restart(&t.env), "`pai token` starts the proxy itself on Windows");

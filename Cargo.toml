@@ -1,6 +1,6 @@
 [package]
 name = "pai"
-version = "0.1.21"
+version = "0.1.22"
 edition = "2024"
 description = "Gives coding tools a DawonAI day credential without a long-lived API key"
 license = "MIT"
@@ -36,6 +36,10 @@ security-framework = "3.7"
 # Test mode, for staging builds only (docs/TESTING.md). Release builds leave it off, so they have
 # no way to trust a CA or pins other than their own.
 test-mode = []
+
+# DPAPI, for the sealed secrets file (src/sealed.rs). Microsoft's own bindings, already in Cargo.lock.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
