@@ -29,7 +29,8 @@ struct Cli {
 enum Command {
     /// Link this machine using the code from Account > Set up a coding tool in the DawonAI web app
     Pair {
-        /// The 8-character pairing code (dashes and case don't matter)
+        /// The pairing code from the web app: 8 characters (dashes and case don't matter), then a dot
+        /// and the account's pass key
         code: String,
         /// Relay URL [env: PAI_RELAY_URL] [default: this release's relay]
         #[arg(long)]
@@ -63,6 +64,13 @@ enum Command {
     /// Show whether this machine is paired, and the plan. Never prints secrets.
     Status,
 
+    /// Save the account's pass key on a computer that's already paired, so it shares the account's
+    /// day pass. The web app's `pai pair` command does the same.
+    #[command(name = "pass-key")]
+    PassKey {
+        /// The pass key, the part after the dot in the web app's `pai pair` command
+        key: String,
+    },
     /// Remove this device from the account and delete its key and config
     Unpair,
     /// Run the local proxy at login, for tools that can't run `pai token` (macOS and Linux)
@@ -159,12 +167,15 @@ fn run(command: Command) -> Result<(), Error> {
                         eprintln!("{warning}");
                     }
                 }
-                Err(Error::AlreadyPaired) if harness.is_some() => {
+                Err(Error::AlreadyPaired) if harness.is_some() || code.contains('.') => {
                     let account = env.config().ok().flatten().map(|c| c.account_id).unwrap_or_default();
                     println!(
                         "This computer is already paired with account {account}, so the new code stays unused. \
                          To pair it with another account, run `pai unpair` first."
                     );
+                    if code.contains('.') {
+                        println!("Saved the account's pass key: this computer now shares your account's day pass.");
+                    }
                 }
                 Err(e) => return Err(e),
             }
@@ -194,6 +205,11 @@ fn run(command: Command) -> Result<(), Error> {
                 println!();
                 print!("{}", setup::run(&env, tool, &target, false)?);
             }
+        }
+        Command::PassKey { key } => {
+            env.paired()?;
+            app::save_pass_key(&env, &key)?;
+            println!("Saved the account's pass key: this computer now shares your account's day pass.");
         }
         Command::Token => {
             let key = app::token(&env)?;

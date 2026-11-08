@@ -15,7 +15,7 @@ use pai::keystore::Keystore;
 use pai::service::{Commands, Manager};
 use pai_proto::{
     AccountView, ApiError, ApiErrorBody, CredentialRequest, CredentialResponse, DeviceAuth,
-    DeviceKind, DeviceRegistered, IssuerKeyInfo, IssuerKeyPair, IssuerKeys, PairRequest, Plan, b64,
+    DeviceKind, DeviceRegistered, IssuerKeyInfo, IssuerKeyPair, IssuerKeys, PairRequest, Plan, SharedPass, b64,
     day_number, now_unix, unb64,
 };
 use serde::Serialize;
@@ -63,6 +63,12 @@ pub struct State {
     pub seen_signatures: HashSet<Vec<u8>>,
     /// Pretend the next signed write was already seen, as the relay does for a same-second repeat.
     pub replay_next_write: bool,
+    /// One day pass per account is in force (`PAI_SHARED_PASS_FROM` has passed).
+    pub shared_enforced: bool,
+    /// Sealed passes the account's devices left, by plan, adult and period.
+    pub shared: HashMap<(Plan, bool, u32), String>,
+    /// Passes signed for the account, by plan, adult and period, while enforced.
+    pub account_issued: HashMap<(Plan, bool, u32), u32>,
 }
 
 pub struct FakeRelay {
@@ -275,6 +281,16 @@ fn handle(
                     .insert("retry-after", axum::http::HeaderValue::from(7_380u64));
                 return r;
             }
+            if s.shared_enforced {
+                if !req.shared {
+                    return error(StatusCode::FORBIDDEN, "pass_key_required", "This account shares one day pass between its devices.");
+                }
+                let n = s.account_issued.entry((req.plan, req.adult, req.day)).or_default();
+                if *n >= 1 {
+                    return error(StatusCode::CONFLICT, "pass_already_issued", "Another device on this account is collecting this period's day pass.");
+                }
+                *n += 1;
+            }
             let blind = kp
                 .sk
                 .blind_sign(unb64(&req.blind_message).unwrap())
@@ -291,6 +307,24 @@ fn handle(
                     StatusCode::NO_CONTENT.into_response()
                 }
                 Err(r) => r,
+            }
+        }
+        (m, p) if p.starts_with("/v1/credentials/shared/") => {
+            if let Err(r) = authenticate(&mut s, &method, &uri, &headers, &body) {
+                return r;
+            }
+            let day: u32 = p.trim_start_matches("/v1/credentials/shared/").parse().unwrap();
+            if m == "PUT" {
+                let pass: SharedPass = serde_json::from_slice(&body).unwrap();
+                s.shared.insert((pass.plan, pass.adult, day), pass.sealed);
+                return StatusCode::NO_CONTENT.into_response();
+            }
+            let q = uri.query().unwrap_or("");
+            let plan = q.split('&').find_map(|kv| kv.strip_prefix("plan=")).and_then(|v| Plan::parse(v).ok()).unwrap();
+            let adult = q.split('&').any(|kv| kv == "adult=1");
+            match s.shared.get(&(plan, adult, day)) {
+                Some(sealed) => ok(SharedPass { plan, adult, sealed: sealed.clone() }),
+                None => error(StatusCode::NOT_FOUND, "no_shared_pass", "No device on this account has shared this period's day pass yet."),
             }
         }
         _ => error(StatusCode::NOT_FOUND, "not_found", "no such endpoint"),

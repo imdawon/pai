@@ -12,6 +12,9 @@ pub enum Error {
     Banned,
     DeviceRemoved,
     IssuanceLimit { retry_after: Option<u64> },
+    PassKeyRequired,
+    PassAlreadyIssued,
+    BadPassKey,
     ClockSkew,
     WrongDay(String),
     RelayUnreachable(String),
@@ -99,6 +102,21 @@ impl fmt::Display for Error {
                     None => write!(f, "; it can get a new one after midnight UTC"),
                 }
             }
+            Error::PassKeyRequired => write!(
+                f,
+                "your DawonAI account shares one day pass between its devices, and this computer doesn't have the \
+                 account's pass key yet. In the DawonAI web app, open Account > Set up a coding tool and run the \
+                 `pai pair` command it shows; on a paired computer it only adds the pass key"
+            ),
+            Error::PassAlreadyIssued => write!(
+                f,
+                "another of your devices is collecting this period's day pass and hasn't shared it yet. Try again in a minute"
+            ),
+            Error::BadPassKey => write!(
+                f,
+                "the part after the dot isn't a DawonAI pass key: copy the whole `pai pair` command from Account > \
+                 Set up a coding tool in the DawonAI web app"
+            ),
             Error::WrongDay(msg) => write!(
                 f,
                 "the relay refused today's date: {}. Check this computer's date and time zone",

@@ -14,6 +14,9 @@ pub const CREDENTIAL: &str = "day-credential";
 pub const NEXT_CREDENTIAL: &str = "next-day-credential";
 /// The key coding tools send to the local proxy. It only works on this machine.
 pub const PROXY_KEY: &str = "local-proxy-key";
+/// The account's pass key (base64url of 32 bytes), from the web app's pairing command. Every device
+/// that holds it derives the same day pass, so a plan's streams are counted per account.
+pub const PASS_KEY: &str = "pass-key";
 
 /// Holds the device key and the cached day credentials.
 #[derive(Debug, Clone)]
