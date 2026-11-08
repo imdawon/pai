@@ -166,7 +166,7 @@ impl fmt::Display for Error {
                 "this computer is paired, but pai can't find its device key. Run `pai unpair`, then pair again \
                  from Account > Set up a coding tool in the DawonAI web app"
             ),
-            Error::Keystore(msg) => write!(f, "couldn't use the keychain: {msg}"),
+            Error::Keystore(msg) => write!(f, "pai couldn't read or save its secrets: {msg}"),
             Error::Io(msg) => write!(f, "{msg}"),
             Error::Setup(msg) => write!(f, "{msg}"),
             Error::Update(msg) => write!(f, "couldn't update pai: {msg}"),
