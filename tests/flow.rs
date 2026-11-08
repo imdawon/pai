@@ -583,3 +583,91 @@ fn a_plan_change_or_a_rotate_replaces_the_held_passes() {
     assert!(today_pass(&t).is_some_and(|c| c.plan == Plan::Agent));
     assert!(t.env.keystore.get(NEXT_CREDENTIAL).unwrap().is_none());
 }
+
+// One day pass per account.
+
+const PASS_KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
+
+fn paired_with(relay: &FakeRelay, code: &str) -> TestEnv {
+    let t = TestEnv::new();
+    app::pair(&t.env, code, Some(&relay.url), Some("http://api.test/"), None, None, None).unwrap();
+    t
+}
+
+#[test]
+fn devices_with_the_pass_key_share_one_day_pass() {
+    let relay = FakeRelay::start(CODE);
+    relay.state.lock().unwrap().codes.insert("WXYZ6789".into());
+    relay.state.lock().unwrap().shared_enforced = true;
+    let laptop = paired_with(&relay, &format!("{CODE}.{PASS_KEY}"));
+    let desktop = paired_with(&relay, &format!("wxyz-6789.{PASS_KEY}"));
+    assert!(app::has_pass_key(&laptop.env));
+
+    let a = app::credential(&laptop.env, false).unwrap();
+    // The second device opens the pass the first left, instead of collecting another.
+    let b = app::credential(&desktop.env, false).unwrap();
+    assert_eq!(a, b, "one pass for the account, so its streams count once");
+    assert_eq!(relay.issued(), 1);
+    Credential::decode(&b).unwrap().verify(issuer_public_key(Plan::Chat, today())).unwrap();
+    let requests = relay.state.lock().unwrap().requests.clone();
+    assert!(requests.iter().any(|r| r.starts_with("PUT /v1/credentials/shared/")), "{requests:?}");
+}
+
+#[test]
+fn the_same_pass_comes_out_when_the_left_one_is_missing() {
+    // A device that never saw the left pass still derives the same one: the nonce comes from the
+    // pass key and the signature is deterministic.
+    let relay = FakeRelay::start(CODE);
+    relay.state.lock().unwrap().codes.insert("WXYZ6789".into());
+    let laptop = paired_with(&relay, &format!("{CODE}.{PASS_KEY}"));
+    let desktop = paired_with(&relay, &format!("WXYZ6789.{PASS_KEY}"));
+    let a = app::credential(&laptop.env, false).unwrap();
+    relay.state.lock().unwrap().shared.clear();
+    let b = app::credential(&desktop.env, false).unwrap();
+    assert_eq!(a, b);
+}
+
+#[test]
+fn without_the_pass_key_pai_says_how_to_get_it() {
+    let relay = FakeRelay::start(CODE);
+    let t = paired(&relay);
+    assert!(!app::has_pass_key(&t.env));
+    // Before enforcement, a computer without the pass key still collects its own.
+    app::credential(&t.env, false).unwrap();
+    assert!(app::status(&t.env).unwrap().to_string().contains("Day pass:   this computer's own"));
+
+    relay.state.lock().unwrap().shared_enforced = true;
+    let err = app::credential(&t.env, true).unwrap_err();
+    assert!(matches!(err, Error::PassKeyRequired), "{err}");
+    assert!(err.to_string().contains("pai pair"), "{err}");
+
+    // The web app's command on a paired computer adds the pass key and keeps the pairing.
+    let again = app::pair(&t.env, &format!("ZZZZ2222.{PASS_KEY}"), Some(&relay.url), None, None, None, None);
+    assert!(matches!(again, Err(Error::AlreadyPaired)));
+    assert!(app::has_pass_key(&t.env));
+    assert!(t.env.keystore.get(CREDENTIAL).unwrap().is_none(), "this device's own pass goes");
+    app::credential(&t.env, false).unwrap();
+    assert!(app::status(&t.env).unwrap().to_string().contains("Day pass:   shared by your account's devices"));
+
+    app::unpair(&t.env).unwrap();
+    assert!(!app::has_pass_key(&t.env));
+}
+
+#[test]
+fn a_pass_key_is_checked() {
+    assert!(matches!(app::split_pairing("ABCD2345.short"), Err(Error::BadPassKey)));
+    assert!(matches!(app::split_pairing("ABCD-2345"), Ok((c, None)) if c == "ABCD2345"));
+    let (code, key) = app::split_pairing(&format!("abcd-2345.{PASS_KEY}")).unwrap();
+    assert_eq!((code.as_str(), key.unwrap().as_str()), ("ABCD2345", PASS_KEY));
+}
+
+#[test]
+fn another_device_collecting_is_waited_for_then_reported() {
+    let relay = FakeRelay::start(CODE);
+    relay.state.lock().unwrap().shared_enforced = true;
+    let t = paired_with(&relay, &format!("{CODE}.{PASS_KEY}"));
+    // The account's pass was signed for another device, which hasn't left it.
+    relay.state.lock().unwrap().account_issued.insert((Plan::Chat, false, today()), 1);
+    let err = app::credential(&t.env, false).unwrap_err();
+    assert!(matches!(err, Error::PassAlreadyIssued), "{err}");
+}

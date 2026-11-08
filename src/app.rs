@@ -14,7 +14,7 @@ use crate::config::{
     Config, DEFAULT_API_URL, DEFAULT_RELAY_URL, Paths, TestMode, app_url_for_relay, openable_url, trim_url,
 };
 use crate::error::{Error, Result, io_err};
-use crate::keystore::{CREDENTIAL, DEVICE_KEY, Keystore, NEXT_CREDENTIAL, PROXY_KEY};
+use crate::keystore::{CREDENTIAL, DEVICE_KEY, Keystore, NEXT_CREDENTIAL, PASS_KEY, PROXY_KEY};
 use crate::relay::Relay;
 use crate::service::{Commands, Manager};
 
@@ -187,6 +187,54 @@ pub fn normalize_code(code: &str) -> Result<String> {
     Ok(out)
 }
 
+/// The web app's pairing command is `pai pair <code>.<pass key>`: the pairing code, then the
+/// account's pass key (base64url of 32 bytes), which the relay never sees. A code alone still works.
+pub fn split_pairing(arg: &str) -> Result<(String, Option<Zeroizing<String>>)> {
+    let (code, pass_key) = match arg.trim().split_once('.') {
+        Some((code, key)) => (code, Some(parse_pass_key(key)?)),
+        None => (arg, None),
+    };
+    Ok((normalize_code(code)?, pass_key))
+}
+
+/// A pass key as the web app shows it, checked and in the form pai stores.
+pub fn parse_pass_key(key: &str) -> Result<Zeroizing<String>> {
+    let bytes = Zeroizing::new(unb64(key.trim()).ok_or(Error::BadPassKey)?);
+    if bytes.len() != pai_proto::PASS_KEY_LEN {
+        return Err(Error::BadPassKey);
+    }
+    Ok(Zeroizing::new(b64(&*bytes)))
+}
+
+/// Keeps the account's pass key. Passes held from before were this device's own, so they go:
+/// the next request collects the account's shared one.
+pub fn save_pass_key(env: &Env, key: &str) -> Result<()> {
+    let key = parse_pass_key(key)?;
+    if env.keystore.get(PASS_KEY)?.as_deref().map(|k| k.as_str()) == Some(key.as_str()) {
+        return Ok(());
+    }
+    let _lock = lock(env)?;
+    env.keystore.set(PASS_KEY, &key)?;
+    env.keystore.delete(CREDENTIAL)?;
+    env.keystore.delete(NEXT_CREDENTIAL)?;
+    Ok(())
+}
+
+fn pass_key(env: &Env) -> Result<Option<Zeroizing<[u8; pai_proto::PASS_KEY_LEN]>>> {
+    let Some(stored) = env.keystore.get(PASS_KEY)? else {
+        return Ok(None);
+    };
+    let bytes = unb64(&stored).filter(|b| b.len() == pai_proto::PASS_KEY_LEN).ok_or(Error::BadPassKey)?;
+    let mut out = Zeroizing::new([0u8; pai_proto::PASS_KEY_LEN]);
+    out.copy_from_slice(&bytes);
+    Ok(Some(out))
+}
+
+/// Whether this computer holds the account's pass key, for `pai status`.
+pub fn has_pass_key(env: &Env) -> bool {
+    env.keystore.get(PASS_KEY).ok().flatten().is_some()
+}
+
 fn default_device_name() -> String {
     let host = gethostname::gethostname()
         .to_string_lossy()
@@ -210,8 +258,12 @@ pub fn pair(
     name: Option<&str>,
     test: Option<(&std::path::Path, &[String])>,
 ) -> Result<Config> {
-    let code = normalize_code(code)?;
+    let (code, pass_key) = split_pairing(code)?;
     if env.config()?.is_some() {
+        // The web app's command on a computer that's already paired adds the pass key.
+        if let Some(k) = &pass_key {
+            save_pass_key(env, k)?;
+        }
         return Err(Error::AlreadyPaired);
     }
     env.keystore.check()?;
@@ -256,6 +308,10 @@ pub fn pair(
     env.keystore.set(DEVICE_KEY, &Zeroizing::new(b64(key.to_bytes())))?;
     env.keystore.delete(CREDENTIAL)?;
     env.keystore.delete(NEXT_CREDENTIAL)?;
+    match &pass_key {
+        Some(k) => env.keystore.set(PASS_KEY, k)?,
+        None => env.keystore.delete(PASS_KEY)?,
+    }
     let request = PairRequest {
         code,
         device: NewDevice {
@@ -268,6 +324,7 @@ pub fn pair(
         Ok(r) => r,
         Err(e) => {
             let _ = env.keystore.delete(DEVICE_KEY);
+            let _ = env.keystore.delete(PASS_KEY);
             return Err(e);
         }
     };
@@ -284,6 +341,7 @@ pub fn pair(
         // Don't leave a registered device behind that nothing on this machine can use.
         let _ = relay.delete_self(&key, &registered.device_id);
         let _ = env.keystore.delete(DEVICE_KEY);
+        let _ = env.keystore.delete(PASS_KEY);
         return Err(e);
     }
     Ok(config)
@@ -714,28 +772,120 @@ fn fetch_credential(env: &Env, config: &Config, offset: u32) -> Result<(String, 
     let issuer = pai_proto::issuer_public_key_from_spki(&info.spki)
         .map_err(|e| Error::BadIssuerResponse(format!("unreadable issuer key: {e}")))?;
 
-    let pending = PendingCredential::new_for(&issuer, plan, adult, day)
-        .map_err(|e| Error::BadIssuerResponse(e.to_string()))?;
+    let credential = match pass_key(env)? {
+        Some(pass_key) => collect_shared(env, &relay, &key, config, &issuer, &pass_key, plan, adult, day)?,
+        None => {
+            let pending = PendingCredential::new_for(&issuer, plan, adult, day)
+                .map_err(|e| Error::BadIssuerResponse(e.to_string()))?;
+            collect(&relay, &key, config, &issuer, pending, (plan, adult, day), false)?
+        }
+    };
+    // Callers hold the lock. Now that a new pass is here, held ones with an old plan or setting go;
+    // they would otherwise last their period.
+    drop_stale_passes(env, &account)?;
+    Ok((credential.encode(), day))
+}
+
+/// Asks the relay to sign `pending` and checks the result.
+fn collect(
+    relay: &Relay,
+    key: &SigningKey,
+    config: &Config,
+    issuer: &pai_proto::IssuerPublicKey,
+    pending: PendingCredential,
+    (plan, adult, day): (Plan, bool, u32),
+    shared: bool,
+) -> Result<pai_proto::Credential> {
     let request = CredentialRequest {
         plan,
         adult,
         day,
         blind_message: b64(pending.blind_message()),
-        shared: false,
+        shared,
     };
-    let response = relay.credentials(&key, &config.device_id, &request)?;
+    let response = relay.credentials(key, &config.device_id, &request)?;
     let blind_signature = unb64(&response.blind_signature)
         .ok_or_else(|| Error::BadIssuerResponse("the blind signature isn't base64url".into()))?;
     let credential = pending
-        .finalize(&issuer, &blind_signature)
+        .finalize(issuer, &blind_signature)
         .map_err(|_| Error::BadIssuerResponse("the signature doesn't verify".into()))?;
     credential
-        .verify(&issuer)
+        .verify(issuer)
         .map_err(|_| Error::BadIssuerResponse("the signature doesn't verify".into()))?;
-    // Callers hold the lock. Now that a new pass is here, held ones with an old plan or setting go;
-    // they would otherwise last their period.
-    drop_stale_passes(env, &account)?;
-    Ok((credential.encode(), day))
+    Ok(credential)
+}
+
+/// The pass another of the account's devices left with the relay for this plan and period,
+/// opened with the pass key and checked against the issuer key. None if there's none, or it
+/// doesn't open (sealed with another pass key).
+fn open_left(
+    relay: &Relay,
+    key: &SigningKey,
+    config: &Config,
+    issuer: &pai_proto::IssuerPublicKey,
+    pass_key: &[u8; pai_proto::PASS_KEY_LEN],
+    plan: Plan,
+    adult: bool,
+    day: u32,
+) -> Result<Option<pai_proto::Credential>> {
+    let Some(left) = relay.shared_pass(key, &config.device_id, plan, adult, day)? else {
+        return Ok(None);
+    };
+    let Some(sealed) = unb64(&left.sealed) else {
+        return Ok(None);
+    };
+    Ok(pai_proto::open_shared(issuer, pass_key, plan, adult, day, &sealed).ok())
+}
+
+/// How many times pai looks for the pass another device is collecting, waiting 2 s, then 4 s, and
+/// so on: about 20 seconds in all, as the web app does. privacy-ai docs/SETTINGS.md.
+const SHARED_TRIES: u64 = 5;
+
+/// One day pass per account (privacy-ai docs/PROTOCOL.md, "Shared day passes"): open the pass
+/// another device left, or collect it with the nonce from the pass key, so the issuer signs the
+/// same pass every device would get, and leave it sealed for the others.
+#[allow(clippy::too_many_arguments)]
+fn collect_shared(
+    env: &Env,
+    relay: &Relay,
+    key: &SigningKey,
+    config: &Config,
+    issuer: &pai_proto::IssuerPublicKey,
+    pass_key: &[u8; pai_proto::PASS_KEY_LEN],
+    plan: Plan,
+    adult: bool,
+    day: u32,
+) -> Result<pai_proto::Credential> {
+    if let Some(c) = open_left(relay, key, config, issuer, pass_key, plan, adult, day)? {
+        return Ok(c);
+    }
+    let mut attempt = 1;
+    let credential = loop {
+        let pending = PendingCredential::new_shared(issuer, pass_key, plan, adult, day)
+            .map_err(|e| Error::BadIssuerResponse(e.to_string()))?;
+        match collect(relay, key, config, issuer, pending, (plan, adult, day), true) {
+            Ok(c) => break c,
+            Err(Error::PassAlreadyIssued) => {
+                // Another of the account's devices is collecting it, and leaves it when it has it.
+                if let Some(c) = open_left(relay, key, config, issuer, pass_key, plan, adult, day)? {
+                    return Ok(c);
+                }
+                if attempt >= SHARED_TRIES {
+                    return Err(Error::PassAlreadyIssued);
+                }
+                if matches!(env.commands, crate::service::Commands::System) {
+                    std::thread::sleep(Duration::from_secs(2 * attempt));
+                }
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    let sealed = pai_proto::seal_shared(pass_key, &credential).map_err(|e| Error::BadIssuerResponse(e.to_string()))?;
+    let left = pai_proto::SharedPass { plan, adult, sealed: b64(&sealed) };
+    // A pass that couldn't be left still works here; the other devices collect it themselves.
+    let _ = relay.put_shared_pass(key, &config.device_id, day, &left);
+    Ok(credential)
 }
 
 /// Leave the end of each period unused, so a late fetch still lands before the period ends.
@@ -810,6 +960,8 @@ pub struct Status {
     /// Adult content was turned on or off for the account since the held passes were collected,
     /// so this check dropped them.
     pub adult_changed: bool,
+    /// This computer holds the account's pass key, so it shares the account's day pass.
+    pub pass_key: bool,
     /// The harnesses `pai setup` has set up.
     pub harnesses: Vec<crate::setup::Tool>,
     /// What stops pai working, each with what to do; empty when it's configured properly.
@@ -823,6 +975,7 @@ pub fn status(env: &Env) -> Result<Status> {
     let keystore = env.keystore.describe();
     let Some(cfg) = config.clone() else {
         return Ok(Status {
+            pass_key: has_pass_key(env),
             config,
             plan: "-".into(),
             credential_today: false,
@@ -898,6 +1051,7 @@ pub fn status(env: &Env) -> Result<Status> {
         problems.push("No harness is set up. Run `pai setup <claude-code|codex|opencode|omp|hermes> --apply`.".to_string());
     }
     Ok(Status {
+        pass_key: has_pass_key(env),
         config,
         plan,
         credential_today,
@@ -968,6 +1122,15 @@ impl Status {
                 (true, true, false) => "yes, for this hour (1-day trial)",
                 (true, false, true) => "none for this hour; the next hour's is ready (1-day trial; `pai token` collects this hour's)",
                 (true, false, false) => "none for this hour (1-day trial; `pai token` collects it)",
+            }
+        )?;
+        writeln!(
+            f,
+            "Day pass:   {}",
+            if self.pass_key {
+                "shared by your account's devices, so your plan's streams count once per account"
+            } else {
+                "this computer's own; run the `pai pair` command from Account > Set up a coding tool to share your account's"
             }
         )?;
         if self.adult_changed {
@@ -1052,6 +1215,7 @@ pub fn unpair(env: &Env) -> Result<Vec<String>> {
     env.keystore.delete(CREDENTIAL)?;
     env.keystore.delete(NEXT_CREDENTIAL)?;
     env.keystore.delete(PROXY_KEY)?;
+    env.keystore.delete(PASS_KEY)?;
     for path in [env.paths.config_file(), env.paths.lock_file(), env.paths.test_ca_file(), env.paths.web_app_opened_file()] {
         match fs::remove_file(&path) {
             Ok(()) => {}

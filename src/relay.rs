@@ -222,6 +222,34 @@ impl Relay {
         .map_err(device_error)
     }
 
+    /// The account's sealed day pass for `plan` and period `day`, if another of its devices left
+    /// it. None when none has, or the relay is older than shared passes.
+    pub fn shared_pass(
+        &self,
+        key: &SigningKey,
+        device_id: &str,
+        plan: pai_proto::Plan,
+        adult: bool,
+        day: u32,
+    ) -> Result<Option<pai_proto::SharedPass>> {
+        let path = format!("/v1/credentials/shared/{day}?plan={}{}", plan.as_str(), if adult { "&adult=1" } else { "" });
+        match self.call(Method::GET, &path, None::<&()>, Some((key, device_id))) {
+            Ok(p) => Ok(Some(p)),
+            Err(CallError::Http(f)) if f.status == StatusCode::NOT_FOUND => Ok(None),
+            Err(e) => Err(device_error(e)),
+        }
+    }
+
+    /// Leaves the account's day pass, sealed with the pass key, for its other devices.
+    pub fn put_shared_pass(&self, key: &SigningKey, device_id: &str, day: u32, pass: &pai_proto::SharedPass) -> Result<()> {
+        let body = serde_json::to_vec(pass).expect("request serializes");
+        let reply = self.exchange(Method::PUT, &format!("/v1/credentials/shared/{day}"), &body, Some((key, device_id)))?;
+        if reply.status.is_success() {
+            return Ok(());
+        }
+        Err(device_error(CallError::Http(reply.failure())))
+    }
+
     /// Ok(false) when the relay no longer knows this device, which is fine when unpairing.
     pub fn delete_self(&self, key: &SigningKey, device_id: &str) -> Result<bool> {
         let reply = self.exchange(
@@ -279,6 +307,8 @@ fn device_error(e: CallError) -> Error {
             retry_after: f.retry_after,
         },
         "wrong_day" => Error::WrongDay(f.message),
+        "pass_key_required" => Error::PassKeyRequired,
+        "pass_already_issued" => Error::PassAlreadyIssued,
         _ => match f.status {
             StatusCode::UNAUTHORIZED => Error::DeviceRemoved,
             StatusCode::PAYMENT_REQUIRED => Error::NotPaid { detail: f.message },
