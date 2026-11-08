@@ -186,3 +186,43 @@ fn unpair_removes_the_service() {
     assert!(notes.iter().any(|n| n.contains("Removed the login service")), "{notes:?}");
     assert!(!service::installed(&t.env));
 }
+
+#[test]
+fn windows_install_adds_a_run_key_entry_and_removes_it() {
+    let mut t = TestEnv::with_config();
+    t.env.service_manager = Manager::WindowsRun;
+    t.env.pai_bin = PathBuf::from(r"C:\Users\Me Too\AppData\Local\pai\pai.exe");
+    t.env.vars.insert("SystemRoot".into(), r"C:\WINDOWS".into());
+    let port = t.env.vars.remove("PAI_PROXY_PORT").unwrap();
+
+    assert!(service::supported(&t.env));
+    assert!(service::file(&t.env).is_none(), "the registry holds it, not a file");
+    assert_eq!(service::describe(&t.env), "not installed");
+    let command = service::run_command(&t.env);
+    assert_eq!(command, r#""C:\WINDOWS\System32\conhost.exe" --headless "C:\Users\Me Too\AppData\Local\pai\pai.exe" proxy"#);
+
+    let notes = service::install(&t.env).unwrap();
+    assert!(notes[0].contains("DawonAI pai proxy"), "{notes:?}");
+    let add = format!(r"reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v DawonAI pai proxy /t REG_SZ /d {command} /f");
+    assert_eq!(t.env.commands.recorded(), [add.clone()]);
+    assert!(service::installed(&t.env));
+    assert!(service::describe(&t.env).starts_with("installed, starts at login"), "{}", service::describe(&t.env));
+    assert!(!service::restart(&t.env), "`pai token` starts the proxy itself on Windows");
+
+    // Again is fine: /f replaces the value.
+    service::install(&t.env).unwrap();
+    assert_eq!(t.env.commands.recorded().iter().filter(|c| **c == add).count(), 2);
+
+    let notes = service::uninstall(&t.env).unwrap();
+    assert!(notes[0].contains("Removed the login service"), "{notes:?}");
+    assert!(!service::installed(&t.env));
+    assert_eq!(service::describe(&t.env), "not installed");
+    assert!(service::uninstall(&t.env).unwrap()[0].contains("isn't installed"));
+
+    // The Run key can't carry PAI_PROXY_PORT and the like, so pai refuses rather than start a
+    // proxy with other settings.
+    t.env.vars.insert("PAI_PROXY_PORT".into(), port);
+    let e = service::install(&t.env).unwrap_err().to_string();
+    assert!(e.contains("PAI_PROXY_PORT") && e.contains("pai token"), "{e}");
+    assert!(!service::installed(&t.env));
+}

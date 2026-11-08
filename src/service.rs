@@ -1,5 +1,6 @@
 //! `pai service`: runs the local proxy at login, for tools that can't run `pai token` themselves.
-//! A LaunchAgent on macOS, a systemd user unit on Linux.
+//! A LaunchAgent on macOS, a systemd user unit on Linux, and on Windows an entry in the user's
+//! Run key that starts the proxy through `conhost.exe --headless`, so no console window opens.
 
 use std::fs;
 use std::path::PathBuf;
@@ -11,6 +12,10 @@ use crate::error::{Error, Result, io_err};
 
 pub const LABEL: &str = "ai.privacyai.pai-proxy";
 pub const UNIT: &str = "pai-proxy.service";
+/// The per-user Run key Windows starts programs from at login. Writing it needs no administrator.
+pub const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+/// The value under `RUN_KEY`, the name Task Manager's Startup apps shows.
+pub const RUN_VALUE: &str = "DawonAI pai proxy";
 
 /// Carried into the service so it uses the same pairing, keystore and port as this shell.
 const CARRIED_VARS: [&str; 4] = ["PAI_CONFIG_DIR", "PAI_KEYSTORE", "PAI_PROXY_PORT", "PAI_PREFETCH"];
@@ -19,6 +24,7 @@ const CARRIED_VARS: [&str; 4] = ["PAI_CONFIG_DIR", "PAI_KEYSTORE", "PAI_PROXY_PO
 pub enum Manager {
     Launchd,
     Systemd,
+    WindowsRun,
     Unsupported,
 }
 
@@ -28,6 +34,8 @@ impl Manager {
             Manager::Launchd
         } else if cfg!(target_os = "linux") {
             Manager::Systemd
+        } else if cfg!(windows) {
+            Manager::WindowsRun
         } else {
             Manager::Unsupported
         }
@@ -162,7 +170,8 @@ fn no_systemd(env: &Env) -> Error {
     }
 }
 
-/// Where the service file goes. Under `Paths.home`, so tests keep it in a temp dir.
+/// Where the service file goes. Under `Paths.home`, so tests keep it in a temp dir. Windows keeps
+/// the service in the registry, not a file.
 pub fn file(env: &Env) -> Option<PathBuf> {
     match env.service_manager {
         Manager::Launchd => Some(env.paths.home.join("Library").join("LaunchAgents").join(format!("{LABEL}.plist"))),
@@ -174,12 +183,42 @@ pub fn file(env: &Env) -> Option<PathBuf> {
                 .join("user")
                 .join(UNIT),
         ),
-        Manager::Unsupported => None,
+        Manager::WindowsRun | Manager::Unsupported => None,
     }
 }
 
+/// Whether this OS can run the proxy at login.
+pub fn supported(env: &Env) -> bool {
+    env.service_manager != Manager::Unsupported
+}
+
 pub fn installed(env: &Env) -> bool {
-    file(env).is_some_and(|f| f.exists())
+    match env.service_manager {
+        Manager::WindowsRun => windows_installed(env),
+        _ => file(env).is_some_and(|f| f.exists()),
+    }
+}
+
+/// Whether the Run key has pai's value. Tests read what they recorded instead of the registry.
+fn windows_installed(env: &Env) -> bool {
+    match &env.commands {
+        Commands::System => env.commands.run("reg", &["query", RUN_KEY, "/v", RUN_VALUE]).ok,
+        Commands::Record(log) => log
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|c| c.starts_with("reg add ") || c.starts_with("reg delete "))
+            .is_some_and(|c| c.starts_with("reg add ")),
+    }
+}
+
+/// The command the Run key starts: pai's proxy under a console host with no window. Without
+/// `conhost.exe --headless` (Windows 10 1809 and later), Windows would open a console window for
+/// the proxy at every login and keep it open.
+pub fn run_command(env: &Env) -> String {
+    let root = env.var("SystemRoot").unwrap_or(r"C:\Windows");
+    format!(r#""{root}\System32\conhost.exe" --headless "{}" proxy"#, env.pai_bin.to_string_lossy())
 }
 
 fn carried(env: &Env) -> Vec<(&'static str, &str)> {
@@ -277,6 +316,9 @@ fn wait_for_proxy(env: &Env) -> bool {
 
 /// Installs the service and starts it, replacing a proxy `pai token` started. Safe to run again.
 pub fn install(env: &Env) -> Result<Vec<String>> {
+    if env.service_manager == Manager::WindowsRun {
+        return install_windows(env);
+    }
     let path = file(env).ok_or_else(unsupported)?;
     if env.service_manager == Manager::Systemd && !systemd_running(env) {
         return Err(no_systemd(env));
@@ -336,6 +378,39 @@ pub fn install(env: &Env) -> Result<Vec<String>> {
     Ok(notes)
 }
 
+/// The Run key has no place for environment variables, so a service started from it would use
+/// another pairing, keystore or port than this shell. pai says so instead of installing one.
+fn install_windows(env: &Env) -> Result<Vec<String>> {
+    if let Some((k, _)) = carried(env).first() {
+        return Err(Error::Setup(format!(
+            "{k} is set in this shell, and the Windows login service can't carry it, so the service would use another \
+             setting. Unset {k} and run `pai service install` again, or keep using `pai token` to start the proxy"
+        )));
+    }
+    let config = env.paired()?;
+    crate::proxy::upstream_client(env, &config)?;
+    let key = app::local_key(env)?;
+    let command = run_command(env);
+    env.commands.must("reg", &["add", RUN_KEY, "/v", RUN_VALUE, "/t", "REG_SZ", "/d", &command, "/f"])?;
+    let mut notes = vec![format!("Added \"{RUN_VALUE}\" to {RUN_KEY}")];
+    app::stop_proxy_and_wait(env, &key);
+    let url = crate::proxy::url(env);
+    match env.commands {
+        Commands::System => {
+            app::spawn_detached(env, &["proxy"]).map_err(|e| Error::Io(format!("couldn't start pai's local proxy: {e}")))?;
+            if wait_for_proxy(env) {
+                notes.push(format!("The proxy runs at {url} now, and starts when you log in."));
+            } else {
+                notes.push(format!(
+                    "Installed, but the proxy isn't answering at {url} yet. Run `pai service status` in a moment, or `pai proxy` to see why"
+                ));
+            }
+        }
+        Commands::Record(_) => notes.push(format!("The proxy will run at {url}, and start when you log in.")),
+    }
+    Ok(notes)
+}
+
 /// Under WSL, `pai pair --setup` also installs the login service, so systemd restarts the proxy
 /// if it stops and keeps what it prints in the journal (`journalctl --user -u pai-proxy`). Returns
 /// what to tell the person; nothing when this isn't WSL or the service is already there.
@@ -353,6 +428,17 @@ pub fn set_up_under_wsl(env: &Env) -> Vec<String> {
 }
 
 pub fn uninstall(env: &Env) -> Result<Vec<String>> {
+    if env.service_manager == Manager::WindowsRun {
+        if !windows_installed(env) {
+            return Ok(vec!["The login service isn't installed.".into()]);
+        }
+        env.commands.must("reg", &["delete", RUN_KEY, "/v", RUN_VALUE, "/f"])?;
+        // As launchctl bootout and systemctl disable --now do, stop the proxy the service ran.
+        if let Ok(Some(key)) = env.keystore.get(crate::keystore::PROXY_KEY) {
+            app::stop_proxy_and_wait(env, &key);
+        }
+        return Ok(vec![format!("Removed the login service (\"{RUN_VALUE}\" in {RUN_KEY}).")]);
+    }
     let path = file(env).ok_or_else(unsupported)?;
     if !path.exists() {
         return Ok(vec!["The login service isn't installed.".into()]);
@@ -381,12 +467,20 @@ pub fn restart(env: &Env) -> bool {
     match env.service_manager {
         Manager::Launchd => env.commands.run("launchctl", &["kickstart", "-k", &format!("{}/{LABEL}", domain())]).ok,
         Manager::Systemd => env.commands.run("systemctl", &["--user", "restart", UNIT]).ok,
-        Manager::Unsupported => false,
+        // The Run key only starts the proxy at login, so `pai token` starts it as before.
+        Manager::WindowsRun | Manager::Unsupported => false,
     }
 }
 
 /// One line for `pai status` and `pai service status`.
 pub fn describe(env: &Env) -> String {
+    if env.service_manager == Manager::WindowsRun {
+        return if windows_installed(env) {
+            format!("installed, starts at login (\"{RUN_VALUE}\" in {RUN_KEY})")
+        } else {
+            "not installed".into()
+        };
+    }
     let Some(path) = file(env) else {
         return "not available on this OS".into();
     };
