@@ -52,6 +52,23 @@ fn main() {
         sdk.trim()
     );
     println!("cargo:rustc-link-search=native=/usr/lib/swift");
+    // The static back-deployment shims (swiftCompatibility56, swiftCompatibilityConcurrency, ...)
+    // that swiftc auto-links for a macOS 11 target ship only in the toolchain, next to swiftc.
+    let swiftc = String::from_utf8(
+        Command::new("xcrun")
+            .args(["--find", "swiftc"])
+            .output()
+            .expect("xcrun --find swiftc")
+            .stdout,
+    )
+    .unwrap();
+    let toolchain = PathBuf::from(swiftc.trim());
+    let shims = toolchain
+        .parent()
+        .and_then(|bin| bin.parent())
+        .expect("pai: swiftc path")
+        .join("lib/swift/macosx");
+    println!("cargo:rustc-link-search=native={}", shims.display());
     println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
     for lib in ["swiftCore", "swiftFoundation"] {
         println!("cargo:rustc-link-lib=dylib={lib}");

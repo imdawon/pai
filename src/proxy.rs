@@ -485,6 +485,8 @@ async fn route(State(p): State<Arc<Proxy>>, req: Request) -> Response {
 }
 
 impl Proxy {
+    // The error is the response sent straight back to the coding harness.
+    #[allow(clippy::result_large_err)]
     async fn credential(&self, refresh: bool) -> std::result::Result<String, Response> {
         // Read from pai's store on every request, not kept in memory: `pai status` and the daily
         // collection replace a held pass when the account's adult content setting changes.
@@ -511,6 +513,8 @@ impl Proxy {
 
     /// Waits for one of the plan's streams: the number the model API last named for this plan, or
     /// before it has named one, the number built into pai.
+    // The error is the response sent straight back to the coding harness.
+    #[allow(clippy::result_large_err)]
     async fn stream_slot(&self) -> std::result::Result<OwnedSemaphorePermit, Response> {
         let credential = self.credential(false).await?;
         let plan = Credential::decode(&credential).map_or(Plan::Chat, |c| c.plan);

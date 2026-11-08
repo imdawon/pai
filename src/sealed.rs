@@ -278,12 +278,20 @@ fn enclave_agree(key: &[u8], peer: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
 
 #[cfg(target_os = "macos")]
 fn helper(op: &str, input: &[u8]) -> Result<Vec<u8>> {
+    use std::time::Duration;
+
+    let exe = std::env::current_exe()
+        .map_err(|e| Error::Keystore(format!("can't find pai itself: {e}")))?;
+    run_child(&exe, op, input, Duration::from_secs(HELPER_TIMEOUT_SECS))
+}
+
+/// Runs `<exe> keystore-helper <op>` and kills it if it hasn't finished within `limit`.
+#[cfg(target_os = "macos")]
+fn run_child(exe: &Path, op: &str, input: &[u8], limit: std::time::Duration) -> Result<Vec<u8>> {
     use std::io::{Read, Write};
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
-    let exe = std::env::current_exe()
-        .map_err(|e| Error::Keystore(format!("can't find pai itself: {e}")))?;
     let mut child = Command::new(exe)
         .args(["keystore-helper", op])
         .stdin(Stdio::piped())
@@ -294,7 +302,7 @@ fn helper(op: &str, input: &[u8]) -> Result<Vec<u8>> {
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(input);
     }
-    let deadline = Instant::now() + Duration::from_secs(HELPER_TIMEOUT_SECS);
+    let deadline = Instant::now() + limit;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -303,7 +311,8 @@ fn helper(op: &str, input: &[u8]) -> Result<Vec<u8>> {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(Error::Keystore(format!(
-                    "the Secure Enclave didn't answer within {HELPER_TIMEOUT_SECS} s. If this keeps happening, log out of macOS and back in"
+                    "the Secure Enclave didn't answer within {} s. If this keeps happening, log out of macOS and back in",
+                    limit.as_secs()
                 )));
             }
         }
@@ -544,5 +553,41 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("pai update"), "{err}");
+    }
+
+    /// A helper that never answers is killed at the time limit, and its process is gone. A stub
+    /// stands in for `pai keystore-helper`, so the enclave is never asked.
+    #[cfg(target_os = "macos")]
+    fn a_hung_helper_is_killed(limit: std::time::Duration) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("pai-hung-helper-{}-{}", std::process::id(), limit.as_secs()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("pid");
+        let stub = dir.join("stub");
+        std::fs::write(&stub, format!("#!/bin/sh\necho $$ > '{}'\nexec sleep 600\n", pid_file.display())).unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let started = std::time::Instant::now();
+        let err = run_child(&stub, "agree", b"{}", limit).unwrap_err().to_string();
+        let took = started.elapsed();
+        assert!(err.contains(&format!("didn't answer within {} s", limit.as_secs())), "{err}");
+        assert!(took >= limit && took < limit + std::time::Duration::from_secs(5), "{took:?}");
+        let pid = std::fs::read_to_string(&pid_file).unwrap();
+        let alive = std::process::Command::new("/bin/kill").args(["-0", pid.trim()]).status().unwrap().success();
+        assert!(!alive, "the helper {pid} is still running");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_helper_that_doesnt_answer_is_killed() {
+        a_hung_helper_is_killed(std::time::Duration::from_secs(1));
+    }
+
+    /// The same at the real limit: `cargo test -- --ignored` (takes 15 s).
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn a_helper_that_doesnt_answer_is_killed_after_15_s() {
+        a_hung_helper_is_killed(std::time::Duration::from_secs(HELPER_TIMEOUT_SECS));
     }
 }
