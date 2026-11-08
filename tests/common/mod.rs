@@ -235,6 +235,9 @@ fn handle(
                 beta: false,
                 rotate: s.rotate,
                 pass_key: None,
+                brave_web_search_privacy_accepted_at: None,
+                refund_until: None,
+                pending_plan: None,
             })
         }
         ("GET", "/v1/keys") => ok(IssuerKeys {
