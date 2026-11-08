@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::{Error, Result, io_err};
+use crate::sealed;
 
 pub const SERVICE: &str = "dawonai";
 pub const DEVICE_KEY: &str = "device-key";
@@ -29,6 +30,11 @@ pub enum Keystore {
     /// `secrets.json` next to `config.json`, created with mode 0600 on Unix. On Windows it relies
     /// on the user profile's own permissions, like other tools' token files.
     File(PathBuf),
+    /// `secrets.sealed` beside the given `secrets.json` path, sealed by the Secure Enclave (macOS)
+    /// or DPAPI (Windows): it opens only on this computer, for this user, with no prompt
+    /// (src/sealed.rs). A `secrets.json` left by an older pai is sealed and removed the first time
+    /// it's read.
+    Sealed(PathBuf, crate::sealed::Kind),
 }
 
 impl Keystore {
@@ -36,6 +42,7 @@ impl Keystore {
         match self {
             Keystore::Os => "OS keychain".into(),
             Keystore::File(p) => format!("file {}", p.display()),
+            Keystore::Sealed(p, kind) => format!("file {}, {}", sealed::sealed_path(p).display(), kind.describe()),
         }
     }
 
@@ -49,7 +56,7 @@ impl Keystore {
                 }
                 macos_keychain_ready()
             }
-            Keystore::File(_) => Ok(()),
+            Keystore::File(_) | Keystore::Sealed(..) => Ok(()),
         }
     }
 
@@ -64,6 +71,7 @@ impl Keystore {
                 }
             }
             Keystore::File(path) => Ok(read_file(path)?.remove(name).map(Zeroizing::new)),
+            Keystore::Sealed(path, kind) => Ok(read_sealed(path, *kind)?.remove(name).map(Zeroizing::new)),
         }
     }
 
@@ -77,6 +85,11 @@ impl Keystore {
                 let mut map = read_file(path)?;
                 map.insert(name.to_string(), value.to_string());
                 write_file(path, &map)
+            }
+            Keystore::Sealed(path, kind) => {
+                let mut map = read_sealed(path, *kind)?;
+                map.insert(name.to_string(), value.to_string());
+                write_sealed(path, *kind, &map)
             }
         }
     }
@@ -98,8 +111,60 @@ impl Keystore {
                 }
                 Ok(())
             }
+            Keystore::Sealed(path, kind) => {
+                let mut map = read_sealed(path, *kind)?;
+                if map.remove(name).is_some() {
+                    if map.is_empty() {
+                        let sealed = sealed::sealed_path(path);
+                        fs::remove_file(&sealed).map_err(|e| io_err("remove", &sealed, e))?;
+                    } else {
+                        write_sealed(path, *kind, &map)?;
+                    }
+                }
+                Ok(())
+            }
         }
     }
+}
+
+/// The sealed file's secrets. Without one, the plain `secrets.json` an older pai left (or none),
+/// which is sealed and then removed, once the sealed copy is known to open.
+fn read_sealed(json: &Path, kind: sealed::Kind) -> Result<SecretMap> {
+    let path = sealed::sealed_path(json);
+    match fs::read(&path) {
+        Ok(bytes) => {
+            let plain = sealed::open(&path, &bytes)?;
+            serde_json::from_slice(&plain)
+                .map(SecretMap)
+                .map_err(|_| Error::Keystore(format!("{} holds no valid secrets", path.display())))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let map = read_file(json)?;
+            if !map.is_empty() {
+                write_sealed(json, kind, &map)?;
+                if read_sealed_only(&path)?.0 == map.0 {
+                    fs::remove_file(json).map_err(|e| io_err("remove", json, e))?;
+                }
+            }
+            Ok(map)
+        }
+        Err(e) => Err(io_err("read", &path, e)),
+    }
+}
+
+fn read_sealed_only(path: &Path) -> Result<SecretMap> {
+    let bytes = fs::read(path).map_err(|e| io_err("read", path, e))?;
+    let plain = sealed::open(path, &bytes)?;
+    serde_json::from_slice(&plain)
+        .map(SecretMap)
+        .map_err(|_| Error::Keystore(format!("{} holds no valid secrets", path.display())))
+}
+
+fn write_sealed(json: &Path, kind: sealed::Kind, map: &SecretMap) -> Result<()> {
+    let path = sealed::sealed_path(json);
+    let plain = Zeroizing::new(serde_json::to_vec(&map.0).expect("secrets serialize"));
+    let bytes = sealed::seal(&path, kind, &plain)?;
+    write_bytes(&path, &bytes)
 }
 
 /// Asks the default keychain for an item that doesn't exist, with keychain dialogs turned off.
@@ -239,12 +304,19 @@ fn read_file(path: &Path) -> Result<SecretMap> {
 }
 
 fn write_file(path: &Path, map: &SecretMap) -> Result<()> {
+    let text = Zeroizing::new(serde_json::to_string_pretty(&map.0).expect("secrets serialize"));
+    write_bytes(path, text.as_bytes())
+}
+
+/// Writes through a 0600 temporary file and a rename, so a crash never leaves half a file.
+fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     let dir = path
         .parent()
         .ok_or_else(|| Error::Io(format!("bad secrets path {}", path.display())))?;
     fs::create_dir_all(dir).map_err(|e| io_err("create", dir, e))?;
-    let text = Zeroizing::new(serde_json::to_string_pretty(&map.0).expect("secrets serialize"));
-    let tmp = path.with_extension("json.tmp");
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".tmp");
+    let tmp = path.with_file_name(name);
     let _ = fs::remove_file(&tmp);
     let mut opts = fs::OpenOptions::new();
     opts.write(true).create_new(true);
@@ -255,7 +327,7 @@ fn write_file(path: &Path, map: &SecretMap) -> Result<()> {
         opts.mode(0o600);
     }
     let mut f = opts.open(&tmp).map_err(|e| io_err("create", &tmp, e))?;
-    f.write_all(text.as_bytes())
+    f.write_all(bytes)
         .and_then(|_| f.sync_all())
         .map_err(|e| io_err("write", &tmp, e))?;
     drop(f);

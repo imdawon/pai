@@ -1548,7 +1548,7 @@ dependencies = [
 
 [[package]]
 name = "pai"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -1578,6 +1578,7 @@ dependencies = [
  "tokio-rustls",
  "toml_edit",
  "webpki-roots",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 
