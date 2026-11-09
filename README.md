@@ -1,34 +1,66 @@
-# pai
+# DawonAI CLI (`pai`)
 
-Lets coding tools use DawonAI without holding any credential. Each tool talks to `pai`'s local proxy at `http://127.0.0.1:47821`, with a key that only works on this machine. The proxy adds a day credential, which expires at UTC midnight and can't be linked to your account through the credential itself, and sends the request to the model API. `pai` runs on macOS, Windows and Linux.
+`pai` connects your coding harness to [DawonAI](https://ai.imdawon.com): unlimited tokens of the model DawonAI serves, in Claude Code, Codex, OpenCode, OMP, Hermes, or any client written for the OpenAI or Anthropic API. It runs on macOS, Windows and Linux. It's open source, under the MIT license.
 
-**Why a proxy.** The relay that carries your connection holds the IP address the model API's name points to, so it could get a valid certificate for that name and read what your tool sends. The proxy checks the model API's public key against pins built into `pai`, and refuses to connect to anything else, whatever certificate it shows. Coding tools can't do that check themselves.
+```text
+$ pai pair YOURCODE --setup claude-code
+Configured properly: yes
+$ claude
+```
 
-The account key never reaches this machine. What `pai` holds is a device key, which can only fetch day credentials, and which you can remove from the web app at any time.
+## What pai does
+
+Your harness talks to `pai`'s local proxy at `http://127.0.0.1:47821`, with a key that works only on this computer. The proxy adds today's day pass to each request and sends it to the DawonAI model server.
+
+- **No API key.** DawonAI issues no API keys. Each request carries a day pass that expires at UTC midnight and doesn't name your account, so the model server sees that a request is paid for, not which account sent it.
+- **Your harness never sees your account key.** The account key never reaches this computer. `pai` holds a device key, which can only collect day passes, and which you can remove in the DawonAI web app at any time.
+- **Pinned to the model server's key.** `pai` checks the model server's public key on every connection, against pins built into each release, and refuses any other server, whatever certificate it shows. The relay that forwards your request passes it on still encrypted.
+- **Tomorrow's pass, collected today.** On Lite, Chat and Agent, `pai` collects tomorrow's day pass at a random time the day before, so the time it asks the relay doesn't line up with your requests.
+- **No "too many requests".** `pai` sends as many requests at a time as your plan has streams and holds the rest in line, so a harness that sends requests in parallel waits instead of failing.
+- **One command to set up.** `pai` writes each harness's settings, backs up every file it changes, and undoes them with `pai setup <harness> --undo`.
+
+The model server reads each request in order to answer it. DawonAI processes your prompts in memory and they are never written to disk. A day pass doesn't link requests to your account; your IP address, timing and what you write still can. A VPN or Tor hides your IP address from DawonAI. The [pai page](https://ai.imdawon.com/pai/) explains why DawonAI uses `pai` rather than API keys or another proxy.
 
 ## Install
 
-macOS and Linux:
+The easy way: in the [DawonAI web app](https://app.ai.imdawon.com), open **Account > Set up a coding tool** and choose your harness. It shows one command that installs `pai`, pairs this computer and sets up the harness.
+
+To install `pai` on its own, on macOS and Linux:
 
 ```sh
-curl -fsSL https://privacyai.example/pai/install.sh -o /tmp/pai-install.sh && sh /tmp/pai-install.sh
+curl -fsSL https://ai.imdawon.com/pai/install.sh -o /tmp/pai-install.sh && sh /tmp/pai-install.sh
 ```
 
 Windows (PowerShell):
 
 ```powershell
-irm https://privacyai.example/pai/install.ps1 -OutFile $env:TEMP\pai-install.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\pai-install.ps1
+irm https://ai.imdawon.com/pai/install.ps1 -OutFile $env:TEMP\pai-install.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\pai-install.ps1
 ```
 
-Windows Subsystem for Linux (WSL): use the macOS and Linux command, in the WSL terminal where your coding harness runs. pai inside WSL and pai on Windows are separate installs, each paired on its own. Under WSL, `pai pair --setup` also installs the login service (`pai service install`), so systemd restarts the proxy if it stops and keeps what it prints, which `journalctl --user -u pai-proxy` shows. The service needs systemd, which Ubuntu installed with `wsl --install` has on. If systemd is off, pai says how to turn it on: add `[boot]` and `systemd=true` to `/etc/wsl.conf`, run `wsl --shutdown` in PowerShell, open WSL again and run `pai service install`. WSL stops a few seconds after its last terminal closes, and the proxy stops with it. WSL 2 gets half of the computer's memory by default (`memory` in `%UserProfile%\.wslconfig`). If a job in WSL fills that, Linux stops processes to free memory, and pai can be one of them.
+Then pair this computer with the code from **Account > Set up a coding tool**, and set up your harness (`claude-code`, `codex`, `opencode`, `omp`, `hermes` or `other`):
 
-Both download the binary for your OS and CPU, check the signature on `SHA256SUMS` with the pai release key (below), check the binary against `SHA256SUMS`, and install to `~/.local/bin` or `%LOCALAPPDATA%\pai`. `PAI_DOWNLOAD_BASE` changes where they download from, and `PAI_INSTALL_DIR` where they install.
+```sh
+pai pair YOURCODE --setup claude-code
+```
+
+The first line of `pai status` says `Configured properly: yes` when everything worked. Or paste `skill/dawonai/SKILL.md` into your coding agent, and it does all of this for you.
+
+Both installers download the binary for your OS and CPU, check the signature on `SHA256SUMS` with the pai release key (below), check the binary against `SHA256SUMS`, and install to `~/.local/bin` or `%LOCALAPPDATA%\pai`. `PAI_DOWNLOAD_BASE` changes where they download from, and `PAI_INSTALL_DIR` where they install.
 
 The installers check the signature with OpenSSL 3, or with `ssh-keygen` from OpenSSH 8.1 or later. macOS ships OpenSSH. Ubuntu 22.04, Debian 12, Fedora 36 and RHEL 9 and later ship OpenSSL 3. On Windows, `install.ps1` uses the Windows OpenSSH client (**Settings > System > Optional features**), or an OpenSSL 3 such as the one Git for Windows carries. With neither, the installers warn and install with only the checksum, which comes from the same server as the binary. A signature that doesn't match always stops them.
 
+### Windows Subsystem for Linux (WSL)
+
+Use the macOS and Linux command, in the WSL terminal where your coding harness runs. `pai` inside WSL and `pai` on Windows are separate installs, each paired on its own.
+
+- Under WSL, `pai pair --setup` also installs the login service (`pai service install`), so systemd restarts the proxy if it stops and keeps what it prints, which `journalctl --user -u pai-proxy` shows.
+- The service needs systemd, which Ubuntu installed with `wsl --install` has on. If systemd is off, `pai` says how to turn it on: add `[boot]` and `systemd=true` to `/etc/wsl.conf`, run `wsl --shutdown` in PowerShell, open WSL again and run `pai service install`.
+- WSL stops a few seconds after its last terminal closes, and the proxy stops with it.
+- WSL 2 gets half of the computer's memory by default (`memory` in `%UserProfile%\.wslconfig`). If a job in WSL fills that, Linux stops processes to free memory, and `pai` can be one of them.
+
 ### Release key
 
-Every release's `SHA256SUMS` is signed with this Ed25519 key, which is kept offline. A changed binary or `SHA256SUMS` fails the installers' check. The installers come from the same server as the binaries, so whoever controls that server could change the key in them too: compare the key in `install.sh` or `install.ps1` with this one, or download the installer from this repo. The release page shows the same key. `release/SIGNING.md` covers checking a download by hand.
+Every release's `SHA256SUMS` is signed with this Ed25519 key, which is kept offline. A changed binary or `SHA256SUMS` fails the installers' check. The installers come from the same server as the binaries, so whoever controls that server could change the key in them too: compare the key in `install.sh` or `install.ps1` with this one, or run the installer from this repo with `PAI_DOWNLOAD_BASE=https://ai.imdawon.com/pai/latest`. The release page shows the same key. `release/SIGNING.md` covers checking a download by hand.
 
 <!-- release-key -->
 ```text
@@ -46,28 +78,26 @@ pai-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAGsa++CnyyhnTkeYz5TqNZ4GVQCDjmn
 Key ID `f0a52c411efb5295`: its signatures are `SHA256SUMS.f0a52c411efb5295.sig` and `SHA256SUMS.f0a52c411efb5295.sshsig`.
 <!-- /release-key -->
 
-Or paste `skill/dawonai/SKILL.md` into your coding agent, and it does all of this for you.
-
 ## Commands
 
 | Command | Does |
 |---|---|
-| `pai pair <code> [--setup HARNESS] [--relay URL] [--api URL] [--app URL] [--name NAME]` | Links this machine using the code from **Account > Set up a coding tool** in the DawonAI web app: 8 characters, then a dot and the account's pass key. Makes an Ed25519 device key and keeps the pass key. On a computer that's already paired, the same command only adds the pass key. With `--setup`, it then sets up that harness (as `pai setup <harness> --apply`), collects today's credential, starts the proxy and prints `pai status`. The installers pass `pair …` on to it: `sh install.sh pair <code> --setup <harness>` is the one command the web app shows. |
+| `pai pair <code> [--setup HARNESS] [--relay URL] [--api URL] [--app URL] [--name NAME]` | Links this machine using the code from **Account > Set up a coding tool** in the DawonAI web app: 8 characters, then a dot and the account's pass key. Makes an Ed25519 device key and keeps the pass key. On a computer that's already paired, the same command only adds the pass key. With `--setup`, it then sets up that harness (as `pai setup <harness> --apply`), collects today's day pass, starts the proxy and prints `pai status`. The installers pass `pair …` on to it: `sh install.sh pair <code> --setup <harness>` is the one command the web app shows. |
 | `pai pass-key <key>` | Saves the account's pass key, the part after the dot in the web app's `pai pair` command, on a computer that's already paired. |
-| `pai token` | What coding tools run. Makes sure there's a credential for today, starts the local proxy if it isn't running (or is from an older `pai`), and prints the local key and nothing else. |
-| `pai proxy` | Runs the local proxy in the foreground. It only answers on 127.0.0.1, only with the local key, and refuses requests from web pages. Once a day, at a random time, it collects tomorrow's credential. It sends your plan's number of model requests at a time (1 on Lite, 2 on Chat, 3 on Agent and the 1-day trial, as the model API names it in each response) and holds the rest, first come, first served, until one finishes, so a tool that sends requests in parallel waits instead of getting "too many requests". A held request keeps its place until it has a stream or the tool gives up on it. A request that fails before any of the answer arrives (no connection, a 429, or a 500, 502, 503 or 504) is sent again up to 5 times, after 1 s doubling to 30 s plus a random part. |
-| `pai status` | Starts with `Configured properly: yes` (paired, plan paid, pins present, a harness set up) or `no` with what to fix. Then account, plan, device, credentials for today and tomorrow, pins, the proxy and the harnesses set up. Never prints secrets. |
-| `pai unpair` | Stops the proxy and removes the login service, removes the device from your account, then deletes its keys, credentials and config here, even if the relay can't be reached. |
+| `pai token` | What coding tools run. Makes sure there's a day pass for today, starts the local proxy if it isn't running (or is from an older `pai`), and prints the local key and nothing else. |
+| `pai proxy` | Runs the local proxy in the foreground. It only answers on 127.0.0.1, only with the local key, and refuses requests from web pages. Once a day, at a random time, it collects tomorrow's day pass. It sends your plan's number of model requests at a time (1 on Lite, 2 on Chat, 3 on Agent and the 1-day trial, as the model API names it in each response) and holds the rest, first come, first served, until one finishes, so a tool that sends requests in parallel waits instead of getting "too many requests". A held request keeps its place until it has a stream or the tool gives up on it. A request that fails before any of the answer arrives (no connection, a 429, or a 500, 502, 503 or 504) is sent again up to 5 times, after 1 s doubling to 30 s plus a random part. |
+| `pai status` | Starts with `Configured properly: yes` (paired, plan paid, pins present, a harness set up) or `no` with what to fix. Then account, plan, device, day passes for today and tomorrow, pins, the proxy and the harnesses set up. Never prints secrets. |
+| `pai unpair` | Stops the proxy and removes the login service, removes the device from your account, then deletes its keys, day passes and config here, even if the relay can't be reached. |
 | `pai setup <claude-code\|codex\|opencode\|omp\|hermes\|other> [--apply\|--undo]` | Prints the tool's config and where the DawonAI skill goes. `other` prints the settings for any other harness (base URLs, model, context window, max output, key command) and a models.json config to copy, and writes nothing. `pai pair <code> --setup other` prints them last, after `pai status`. `pai setup other --format <models-json\|openai\|anthropic\|claude-code>` prints only a config file in that format (models.json is the format of OMP, pi and harnesses like them), and `--out FILE` writes it to FILE, backing up a file already there. Run it again if your plan's context window changes. `--apply` writes both and backs up any file it changes to `<file>.pai-backup-<time>`. `--undo` puts each changed file back from its first backup (or removes it, if pai made it) and deletes pai's own files and the skill. |
 | `pai update` | Installs the latest release if it's newer. Release builds also do this on their own, once a day, in the background. See [Updates](#updates). |
 | `pai service <install\|uninstall\|status>` | Runs the proxy whenever you're logged in, for tools that can't run `pai token` themselves. A LaunchAgent on macOS, a systemd user service on Linux, which needs systemd running (under WSL, pai says how to turn it on). On Windows, a "DawonAI pai proxy" entry in your user's Run key (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`), which starts the proxy at login through `conhost.exe --headless`, so no window opens; it needs no administrator and shows in Task Manager's Startup apps. Windows doesn't restart the proxy if it stops; the next `pai token` does. |
 
-The relay and API default to `https://relay.privacyai.example` and `https://api.privacyai.example`. Override them at pairing with the flags or `PAI_RELAY_URL` / `PAI_API_URL`. The DawonAI web app's address is `app.<domain>` for a relay at `relay.<domain>`, and `https://app.privacyai.example` for any other relay; `--app` or `PAI_APP_URL` sets it.
+Release builds talk to `https://relay.ai.imdawon.com` and `https://api.ai.imdawon.com`. A build from source uses the placeholder `privacyai.example` instead, unless `PAI_RELEASE_RELAY_URL`, `PAI_RELEASE_API_URL` and `PAI_RELEASE_APP_URL` are set when it's built (`release/build.sh` sets them from `PAI_RELEASE_DOMAIN`). Override them at pairing with the flags or `PAI_RELAY_URL` / `PAI_API_URL`. The DawonAI web app's address is `app.<domain>` for a relay at `relay.<domain>`; `--app` or `PAI_APP_URL` sets it.
 
 | Variable | Does |
 |---|---|
 | `PAI_PROXY_PORT` | The proxy's port, `47821` by default. Run `pai setup` again after changing it. |
-| `PAI_PREFETCH=0` | Stops the proxy collecting tomorrow's credential ahead. |
+| `PAI_PREFETCH=0` | Stops the proxy collecting tomorrow's day pass ahead. |
 | `PAI_OPEN_BROWSER=0` | Stops `pai` opening the DawonAI web app when this computer's device link is removed. |
 | `PAI_AUTO_UPDATE=0` | Stops the daily background update. `pai update` still works. |
 
@@ -75,13 +105,13 @@ Each release carries the pins for the model API's key, plus a spare for when the
 
 Errors go to stderr. `pai token` exits with 2 when not paired, 3 when the plan isn't paid, 4 when the device was removed, and 5 when the relay is unreachable.
 
-**When this computer's device link is removed.** DawonAI removes a `pai` device after 30 days without fetching a credential, and you can remove one in Account in the web app. The next time `pai token`, the proxy or `pai status` asks the relay, `pai` says so on stderr and opens the DawonAI web app in your default browser, at most once a UTC day. Pair again from **Account > Set up a coding tool**, after `pai unpair`.
+**When this computer's device link is removed.** DawonAI removes a `pai` device after 30 days without collecting a day pass, and you can remove one in Account in the web app. The next time `pai token`, the proxy or `pai status` asks the relay, `pai` says so on stderr and opens the DawonAI web app in your default browser, at most once a UTC day. Pair again from **Account > Set up a coding tool**, after `pai unpair`.
 
 ## What's stored where
 
 | What | Where |
 |---|---|
-| Device key, the account's pass key, today's and tomorrow's credentials, the local proxy key | `pai/secrets.sealed` next to the config, created with mode 0600: on a Mac sealed by a key in the Secure Enclave, on Windows by DPAPI for your Windows account. It opens only on this computer and for you, with no password or prompt. On Linux, and on a Mac without a Secure Enclave, `pai/secrets.json` with mode 0600 |
+| Device key, the account's pass key, today's and tomorrow's day passs, the local proxy key | `pai/secrets.sealed` next to the config, created with mode 0600: on a Mac sealed by a key in the Secure Enclave, on Windows by DPAPI for your Windows account. It opens only on this computer and for you, with no password or prompt. On Linux, and on a Mac without a Secure Enclave, `pai/secrets.json` with mode 0600 |
 | Relay URL, API URL, web app URL, device ID, account ID | `pai/config.json` in the OS config directory (`~/Library/Application Support`, `%APPDATA%`, `~/.config`) |
 | Lock that stops parallel `pai token` calls fetching twice | `pai/token.lock` next to the config |
 | The UTC day `pai` last opened the web app for a removed device | `pai/web-app-opened` next to the config |
@@ -89,17 +119,17 @@ Errors go to stderr. `pai token` exits with 2 when not paired, 3 when the plan i
 
 `PAI_CONFIG_DIR` moves all of these files to one directory.
 
-**Why tomorrow's credential is collected ahead.** Collecting a credential is signed with this device's key, so the relay knows which account asked. If `pai` collected it just before your tool used it, someone watching the relay could match the two by time and tie that day's requests to your account. Collecting it at a random time the day before breaks that link. Set `PAI_PREFETCH=0` to turn this off.
+**Why tomorrow's day pass is collected ahead.** Collecting a day pass is signed with this device's key, so the relay knows which account asked. If `pai` collected it just before your tool used it, someone watching the relay could match the two by time and tie that day's requests to your account. Collecting it at a random time the day before breaks that link. Set `PAI_PREFETCH=0` to turn this off.
 
 **One day pass per account.** Every device that holds the account's pass key derives the same day pass for a plan and period, so your plan's streams are counted once for the whole account, however many computers and browsers use it. The first device to collect a period's pass leaves it with the relay, sealed with the pass key, which the relay never sees; the others open that copy. The pass key comes from the web app inside the `pai pair` command and never goes through the relay. `pai status` says whether this computer holds it. Without it, pai collects a pass of its own until the relay requires the pass key (it then says to run the web app's command again).
 
-The secrets live in one file, sealed by the computer's own hardware where it has some (0.1.22 and later). On a Mac, pai makes a P-256 key inside the Secure Enclave, the chip that holds Touch ID keys; the key never leaves the chip, and the file keeps only a handle that works on no other Mac and for no other user. Each write encrypts the secrets with AES-256-GCM under a secret agreed with that key; each read asks the Secure Enclave for the same agreement. On Windows, DPAPI seals the file to your Windows account. Neither asks for a password or shows a prompt, over SSH, from the login service or after an update. Before 0.1.6 pai used the macOS login keychain, which asked for your password whenever it was locked (an SSH session, after sleep) and again after every update; that is why pai doesn't use it. The first time pai 0.1.22 reads a plain `secrets.json`, it seals it into `secrets.sealed`, checks the sealed copy opens, and deletes the plain file. `PAI_KEYSTORE=file` keeps the plain file instead. pai calls the Secure Enclave only from a short-lived copy of itself (`pai keystore-helper`) that has 15 seconds to answer, and only after the stored handle matches its SHA-256: a damaged handle can crash the program that loads it, and on macOS 27.2 it crashed the account's Secure Enclave service until the user logged out. What the file holds can only collect day credentials for this one device, and **Devices** in the DawonAI web app revokes it.
+The secrets live in one file, sealed by the computer's own hardware where it has some (0.1.22 and later). On a Mac, pai makes a P-256 key inside the Secure Enclave, the chip that holds Touch ID keys; the key never leaves the chip, and the file keeps only a handle that works on no other Mac and for no other user. Each write encrypts the secrets with AES-256-GCM under a secret agreed with that key; each read asks the Secure Enclave for the same agreement. On Windows, DPAPI seals the file to your Windows account. Neither asks for a password or shows a prompt, over SSH, from the login service or after an update. Before 0.1.6 pai used the macOS login keychain, which asked for your password whenever it was locked (an SSH session, after sleep) and again after every update; that is why pai doesn't use it. The first time pai 0.1.22 reads a plain `secrets.json`, it seals it into `secrets.sealed`, checks the sealed copy opens, and deletes the plain file. `PAI_KEYSTORE=file` keeps the plain file instead. pai calls the Secure Enclave only from a short-lived copy of itself (`pai keystore-helper`) that has 15 seconds to answer, and only after the stored handle matches its SHA-256: a damaged handle can crash the program that loads it, and on macOS 27.2 it crashed the account's Secure Enclave service until the user logged out. What the file holds can only collect day passes for this one device, and **Devices** in the DawonAI web app revokes it.
 
 Whenever pai needs the device key and the file doesn't have it, it looks where pai before 0.1.6 kept it: `~/.config/pai/secrets.json` on macOS and Windows, then the OS store (the macOS keychain, Windows Credential Manager or the Secret Service on Linux). It moves every secret it finds into the file and deletes them there. On a Mac, reading the keychain can ask for permission one last time. If the old store can't be read, pai says why and tries again on the next command; `pai unpair` always works, and pairing again starts fresh.
 
 ## Updates
 
-The model API names the latest release in a `pai-latest` header on every response. The first time a running proxy sees a version newer than its own, it starts `pai update` in the background, so an update begins on the first request after a release and the proxy is on the new version within a minute. A proxy that sends no requests still checks once a day, at a random time, as does the first `pai token` of the day. Checks and downloads go to `https://api.<domain>/pai/latest/` over the same pinned connection as your requests, through the relay like any request, and carry no credential. They name pai's version and platform in the user agent (`pai/0.1.8 (aarch64-apple-darwin)`); the model server counts them per UTC day, by version and platform, for the operator's dashboard, and keeps no time within the day. Requests to the model API carry your coding tool's own user agent, not pai's.
+The model API names the latest release in a `pai-latest` header on every response. The first time a running proxy sees a version newer than its own, it starts `pai update` in the background, so an update begins on the first request after a release and the proxy is on the new version within a minute. A proxy that sends no requests still checks once a day, at a random time, as does the first `pai token` of the day. Checks and downloads go to `https://api.<domain>/pai/latest/` over the same pinned connection as your requests, through the relay like any request, and carry no day pass. They name pai's version and platform in the user agent (`pai/0.1.8 (aarch64-apple-darwin)`); the model server counts them per UTC day, by version and platform, for the operator's dashboard, and keeps no time within the day. Requests to the model API carry your coding tool's own user agent, not pai's.
 
 `pai` installs a release only if `SHA256SUMS` is signed by the release key built into it and the file matches its hash there, and never one older than itself. It writes the new binary next to the old one and renames it into place. A running proxy moves to the new binary once no request is in flight. On macOS and Linux it hands its open port to the new binary, so a request that arrives during the move waits a moment instead of being refused; on Windows the new proxy opens the port again. The proxy closes each connection after its response, so a coding tool never sends on a connection the old proxy is closing. An update from a pai that kept its secrets in the OS keychain (0.1.5 and older) keeps the local key coding tools already hold. The first `pai token` after an update or a reinstall rewrites the settings of the coding tools you set up with `--apply`, when the new release changes them (the context window, for example), backing up each file it changes.
 
@@ -153,4 +183,8 @@ cargo test --features test-mode
 PAI_TEST_RELAY=http://127.0.0.1:8787 cargo test --test real_relay -- --ignored
 ```
 
-pai is part of DawonAI, a service of Dawon Science and Technology Laboratories LLC.
+## License
+
+MIT. See [LICENSE](LICENSE).
+
+`pai` is part of DawonAI, a service of Dawon Science and Technology Laboratories LLC.
