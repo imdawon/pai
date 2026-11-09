@@ -25,16 +25,6 @@ use crate::report;
 
 pub const DEFAULT_PORT: u16 = 47821;
 const MAX_BODY: usize = 32 * 1024 * 1024;
-/// How long a streamed request waits quietly for one of the plan's streams. After that pai opens
-/// the stream to the coding tool and sends a keepalive every `QUEUE_KEEPALIVE` until a stream
-/// frees, so the tool can tell the request is alive and in line. Requests keep their place: the
-/// line is first come, first served, and no request is ever sent to the back. Both numbers are
-/// in privacy-ai docs/SETTINGS.md.
-const QUEUE_OPEN: Duration = Duration::from_secs(15);
-const QUEUE_KEEPALIVE: Duration = Duration::from_secs(15);
-/// The header that tells the coding tool its request's place in pai's line when the stream opens:
-/// how many of this computer's requests were waiting for a stream, this one included.
-const QUEUE: &str = "pai-queue";
 /// How many times a request is sent again after an error that came before any of the answer: no
 /// connection, a 429 (the API frees a stream a moment after pai does, or it's busy), or a 500,
 /// 502, 503 or 504. Pauses start at 1 s and double, up to 30 s, each with up to half again added
@@ -101,8 +91,6 @@ struct Proxy {
     /// The plan's streams and how many there are, so requests over the limit wait here in the
     /// order they came instead of coming back from the model API as 429s.
     streams: Mutex<Option<(usize, Arc<Semaphore>)>>,
-    /// Requests waiting in that line now.
-    waiting: Arc<AtomicUsize>,
     /// The stream limit the model API last named in `pai-streams`, and the plan it was for.
     learned_streams: Mutex<Option<(Plan, usize)>>,
     /// The context limit the model API last named in `pai-context`.
@@ -229,7 +217,6 @@ pub fn run(env: Env) -> Result<()> {
             fingerprint,
             http,
             streams: Mutex::new(None),
-            waiting: Arc::new(AtomicUsize::new(0)),
             learned_streams: Mutex::new(None),
             learned_context: Mutex::new(crate::setup::learned_context(&env_for_grants)),
             stop: Notify::new(),
@@ -520,40 +507,31 @@ impl Proxy {
         }
     }
 
-    /// The line for the plan's streams: as many as the model API last named for this plan, or
-    /// before it has named one, the number built into pai. Tokio's semaphore serves waiters in the
-    /// order they came.
+    /// Waits for one of the plan's streams: the number the model API last named for this plan, or
+    /// before it has named one, the number built into pai.
     // The error is the response sent straight back to the coding harness.
     #[allow(clippy::result_large_err)]
-    async fn streams(&self) -> std::result::Result<Arc<Semaphore>, Response> {
+    async fn stream_slot(&self) -> std::result::Result<OwnedSemaphorePermit, Response> {
         let credential = self.credential(false).await?;
         let plan = Credential::decode(&credential).map_or(Plan::Chat, |c| c.plan);
         let max = match *self.learned_streams.lock().unwrap() {
             Some((p, n)) if p == plan => n,
             _ => plan.max_streams(),
         };
-        let mut s = self.streams.lock().unwrap();
-        Ok(match &*s {
-            Some((n, streams)) if *n == max => streams.clone(),
-            // A new plan starts a new count. Streams still open under the old one finish on
-            // their own, and the model API's 429 covers any overlap.
-            _ => s.insert((max, Arc::new(Semaphore::new(max)))).1.clone(),
-        })
-    }
-}
-
-/// A request's place in pai's line, counted in `Proxy::waiting` until it's dropped.
-struct InLine(Arc<AtomicUsize>, usize);
-
-impl InLine {
-    fn join(waiting: &Arc<AtomicUsize>) -> Self {
-        InLine(waiting.clone(), waiting.fetch_add(1, Ordering::SeqCst) + 1)
-    }
-}
-
-impl Drop for InLine {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
+        let streams = {
+            let mut s = self.streams.lock().unwrap();
+            match &*s {
+                Some((n, streams)) if *n == max => streams.clone(),
+                // A new plan starts a new count. Streams still open under the old one finish on
+                // their own, and the model API's 429 covers any overlap.
+                _ => s.insert((max, Arc::new(Semaphore::new(max)))).1.clone(),
+            }
+        };
+        // First come, first served, with no time limit: Tokio's semaphore serves waiters in the
+        // order they came, and a request keeps its place until it has a stream or its coding tool
+        // leaves. (Before 0.1.23 a request that had waited 10 minutes rejoined at the back, behind
+        // newer requests, and could wait for an hour; INCIDENTS.md, 2026-11-08.)
+        streams.acquire_owned().await.map_err(|_| error(StatusCode::SERVICE_UNAVAILABLE, "stream_limit", "pai's queue closed. Try again."))
     }
 }
 
@@ -707,132 +685,24 @@ fn note_announced_release(p: &Arc<Proxy>, headers: &HeaderMap) {
 
 async fn forward(p: Arc<Proxy>, req: Request) -> Response {
     let (parts, body) = req.into_parts();
+    // The body is read only once the request has a stream, so a waiting request holds nothing
+    // but its place in line.
+    let slot = if takes_stream(&parts.method, parts.uri.path()) {
+        match p.stream_slot().await {
+            Ok(s) => Some(s),
+            Err(r) => return r,
+        }
+    } else {
+        None
+    };
     let body: Bytes = match axum::body::to_bytes(body, MAX_BODY).await {
         Ok(b) => b,
         Err(_) => return error(StatusCode::PAYLOAD_TOO_LARGE, "request_too_large", "The request is larger than 32 MB."),
     };
     // The person typed `dawonai report`: this request never goes to the model.
     if parts.method == Method::POST && report::is_report_request(&body) {
-        return send_report(&p).await;
+        return hold(send_report(&p).await, slot);
     }
-    if !takes_stream(&parts.method, parts.uri.path()) {
-        return send(p, parts, body, None).await;
-    }
-    let streams = match p.streams().await {
-        Ok(s) => s,
-        Err(r) => return r,
-    };
-    let place = InLine::join(&p.waiting);
-    let mut wait = Box::pin(streams.acquire_owned());
-    let quiet = p.env.var("PAI_TEST_QUEUE_OPEN_MS").and_then(|v| v.parse().ok()).map_or(QUEUE_OPEN, Duration::from_millis);
-    let first = match tokio::time::timeout(quiet, &mut wait).await {
-        Ok(slot) => Some(slot),
-        // Still in line. A reply that isn't streamed has no way to wait out loud: it waits on.
-        Err(_) if !wants_stream(&body) => Some(wait.as_mut().await),
-        Err(_) => None,
-    };
-    if let Some(slot) = first {
-        drop(place);
-        return match slot {
-            Ok(slot) => send(p, parts, body, Some(slot)).await,
-            Err(_) => queue_closed(),
-        };
-    }
-    // Waits out loud: the stream opens now, with keepalives until a stream frees, then carries
-    // the model API's reply, or its error as that API's error event.
-    let keepalive = p.env.var("PAI_TEST_QUEUE_KEEPALIVE_MS").and_then(|v| v.parse().ok()).map_or(QUEUE_KEEPALIVE, Duration::from_millis);
-    let path = parts.uri.path().to_string();
-    let position = place.1;
-    let (tx, rx) = tokio::sync::mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(16);
-    tokio::spawn(async move {
-        let slot = loop {
-            tokio::select! {
-                slot = &mut wait => break slot,
-                _ = tokio::time::sleep(keepalive) => {
-                    // The coding tool left: leave the line.
-                    if tx.send(Ok(Bytes::from_static(KEEPALIVE_COMMENT))).await.is_err() {
-                        return;
-                    }
-                }
-            }
-        };
-        drop(place);
-        let resp = match slot {
-            Ok(slot) => send(p, parts, body, Some(slot)).await,
-            Err(_) => queue_closed(),
-        };
-        let status = resp.status();
-        let mut body = resp.into_body().into_data_stream();
-        if status.is_success() {
-            while let Some(chunk) = body.next().await {
-                let failed = chunk.is_err();
-                if tx.send(chunk.map_err(std::io::Error::other)).await.is_err() || failed {
-                    return;
-                }
-            }
-        } else {
-            let mut text = Vec::new();
-            while let Some(Ok(chunk)) = body.next().await {
-                text.extend_from_slice(&chunk);
-                if text.len() > MAX_ERROR_BODY {
-                    break;
-                }
-            }
-            let _ = tx.send(Ok(Bytes::from(queued_error_event(&path, status, &text)))).await;
-        }
-    });
-    let stream = futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|c| (c, rx)) });
-    let mut out = Response::new(Body::from_stream(stream));
-    let h = out.headers_mut();
-    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
-    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-    h.insert(QUEUE, HeaderValue::from(position));
-    h.insert("x-pai-proxy", HeaderValue::from_static("1"));
-    out
-}
-
-/// An SSE comment: every SSE client skips it, the OpenAI and Anthropic SDKs included, so it's
-/// safe before the API's first event (Anthropic's `ping` event isn't: its SDK expects
-/// `message_start` first).
-const KEEPALIVE_COMMENT: &[u8] = b": pai: waiting for one of the plan's streams\n\n";
-
-fn queue_closed() -> Response {
-    error(StatusCode::SERVICE_UNAVAILABLE, "stream_limit", "pai's queue closed. Try again.")
-}
-
-/// Whether the request asks for a streamed reply (`"stream": true`).
-fn wants_stream(body: &[u8]) -> bool {
-    serde_json::from_slice::<serde_json::Value>(body).is_ok_and(|v| v.get("stream").and_then(|s| s.as_bool()) == Some(true))
-}
-
-/// An error that came back after pai had opened the stream, as the error event of the API the
-/// harness called. The model API's own body is in that API's error shape already; the Responses
-/// API's stream event carries the fields flat.
-fn queued_error_event(path: &str, status: StatusCode, body: &[u8]) -> Vec<u8> {
-    let parsed: serde_json::Value = serde_json::from_slice(body).unwrap_or_else(|_| {
-        let message = format!("DawonAI's model API answered {status} before this reply started. Try again.");
-        json!({"type": "error", "error": {"type": "api_error", "message": message}, KIND_FIELD: "queued_request_failed"})
-    });
-    let kind = parsed.get(KIND_FIELD).cloned().unwrap_or(serde_json::Value::Null);
-    let message = parsed["error"]["message"].as_str().unwrap_or("DawonAI's model API refused this request.").to_string();
-    if path.starts_with("/v1/messages") {
-        let class = parsed["error"]["type"].as_str().unwrap_or("api_error");
-        let data = json!({"type": "error", "error": {"type": class, "message": message}, KIND_FIELD: kind});
-        format!("event: error\ndata: {data}\n\n").into_bytes()
-    } else if path.starts_with("/v1/responses") {
-        let code = parsed["error"]["code"].as_str().or(parsed["error"]["type"].as_str()).unwrap_or("server_error");
-        let data = json!({"type": "error", "code": code, "message": message, "param": parsed["error"]["param"], KIND_FIELD: kind});
-        format!("event: error\ndata: {data}\n\n").into_bytes()
-    } else {
-        let e = &parsed["error"];
-        let data = json!({"error": {"message": message, "type": e["type"].as_str().unwrap_or("server_error"), "param": e["param"], "code": e["code"]}, KIND_FIELD: kind});
-        format!("data: {data}\n\n").into_bytes()
-    }
-}
-
-/// Sends a request to the model API, holding `slot` (one of the plan's streams) until the reply's
-/// last byte.
-async fn send(p: Arc<Proxy>, parts: axum::http::request::Parts, body: Bytes, slot: Option<OwnedSemaphorePermit>) -> Response {
     let mut headers = HeaderMap::new();
     for (name, value) in &parts.headers {
         if forwardable(name) {

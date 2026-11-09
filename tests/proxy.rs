@@ -199,10 +199,6 @@ impl Drop for Running {
 }
 
 fn start(api_port: u16, ca_pem: &str, pin: &str) -> (Running, FakeRelay) {
-    start_with(api_port, ca_pem, pin, &[])
-}
-
-fn start_with(api_port: u16, ca_pem: &str, pin: &str, vars: &[(&str, &str)]) -> (Running, FakeRelay) {
     let relay = FakeRelay::start(CODE);
     let mut t = TestEnv::new();
     let api = format!("https://localhost:{api_port}");
@@ -214,9 +210,6 @@ fn start_with(api_port: u16, ca_pem: &str, pin: &str, vars: &[(&str, &str)]) -> 
     t.env.vars.insert("PAI_PROXY_PORT".into(), port.to_string());
     t.env.vars.insert("PAI_TEST_RETRY_MS".into(), "1".into());
     t.env.vars.insert("PAI_TEST_GRANTS_DELAY_MS".into(), "1".into());
-    for (k, v) in vars {
-        t.env.vars.insert((*k).into(), (*v).into());
-    }
     let key = app::local_key(&t.env).unwrap();
     let env = t.env.clone();
     std::thread::spawn(move || pai::proxy::run(env));
@@ -678,91 +671,24 @@ fn a_long_error_reply_is_passed_on_without_being_held() {
     assert_eq!(r.bytes().unwrap().len(), (3 << 20) + 50, "all of it arrives");
 }
 
-/// Sends a streamed request (`"stream": true`) and returns its status, `pai-queue` header and body.
-fn stream_post(p: &Running, path: &str) -> (u16, Option<String>, String) {
-    let r = p
-        .http
-        .post(format!("http://127.0.0.1:{}{path}", p.port))
-        .header("x-api-key", &p.key)
-        .body(r#"{"stream":true}"#)
-        .send()
-        .unwrap();
-    let status = r.status().as_u16();
-    let queue = r.headers().get("pai-queue").map(|v| v.to_str().unwrap().to_string());
-    (status, queue, r.text().unwrap())
-}
-
 #[test]
-fn a_streamed_request_that_waits_opens_its_stream_and_keeps_it_alive() {
-    let seen = Arc::new(Mutex::new(Seen { slow: Some(Duration::from_millis(800)), streams_header: Some("1".into()), ..Seen::default() }));
+fn waiting_requests_are_served_in_the_order_they_came() {
+    let seen = Arc::new(Mutex::new(Seen { slow: Some(Duration::from_millis(150)), streams_header: Some("1".into()), ..Seen::default() }));
     let (api_port, ca, pin) = fake_gateway(seen.clone());
-    let vars = [("PAI_TEST_QUEUE_OPEN_MS", "100"), ("PAI_TEST_QUEUE_KEEPALIVE_MS", "100")];
-    let (p, _relay) = start_with(api_port, &ca, &pin, &vars);
+    let (p, _relay) = start(api_port, &ca, &pin);
     p.post("/v1/models", Some(&p.key), &[]);
-
+    let order = Arc::new(Mutex::new(Vec::new()));
     std::thread::scope(|scope| {
-        // The API names 1 stream. This one takes it.
-        let first = scope.spawn(|| stream_post(&p, "/v1/messages"));
-        std::thread::sleep(Duration::from_millis(200));
-        let (status, queue, body) = stream_post(&p, "/v1/messages");
-        assert_eq!(status, 200);
-        assert_eq!(queue.as_deref(), Some("1"), "first in line");
-        assert!(body.starts_with(": pai: waiting"), "keepalives while it waits: {body}");
-        assert!(body.ends_with(r#"{"ok":true}"#), "then the model API's reply: {body}");
-        let (status, queue, body) = first.join().unwrap();
-        assert_eq!((status, queue, body.as_str()), (200, None, r#"{"ok":true}"#), "a request that didn't wait is passed on as it came");
+        for i in 0..5 {
+            let (p, order) = (&p, order.clone());
+            scope.spawn(move || {
+                assert_eq!(p.post("/v1/messages", Some(&p.key), &[]).0, 200);
+                order.lock().unwrap().push(i);
+            });
+            // Each joins the line after the one before.
+            std::thread::sleep(Duration::from_millis(40));
+        }
     });
-    assert_eq!(seen.lock().unwrap().most_open, 1, "still one stream at a time");
-}
-
-#[test]
-fn an_error_after_the_stream_opened_is_the_apis_error_event() {
-    let seen = Arc::new(Mutex::new(Seen { slow: Some(Duration::from_millis(600)), streams_header: Some("1".into()), ..Seen::default() }));
-    let (api_port, ca, pin) = fake_gateway(seen.clone());
-    let vars = [("PAI_TEST_QUEUE_OPEN_MS", "100"), ("PAI_TEST_QUEUE_KEEPALIVE_MS", "100")];
-    let (p, _relay) = start_with(api_port, &ca, &pin, &vars);
-    p.post("/v1/models", Some(&p.key), &[]);
-
-    for path in ["/v1/messages", "/v1/responses", "/v1/chat/completions"] {
-        std::thread::scope(|scope| {
-            let first = scope.spawn(|| stream_post(&p, path));
-            std::thread::sleep(Duration::from_millis(200));
-            // Every try of the waiting request is refused.
-            seen.lock().unwrap().refuse_streams = 100;
-            let (status, _, body) = stream_post(&p, path);
-            seen.lock().unwrap().refuse_streams = 0;
-            assert_eq!(status, 200);
-            let event = body.lines().rfind(|l| l.starts_with("data: ")).unwrap_or_else(|| panic!("{path}: {body}"));
-            let data: Value = serde_json::from_str(&event["data: ".len()..]).unwrap();
-            match path {
-                "/v1/messages" => {
-                    assert!(body.contains("event: error\n"), "{body}");
-                    assert_eq!((data["type"].as_str(), data["error"]["type"].as_str()), (Some("error"), Some("stream_limit")));
-                }
-                "/v1/responses" => {
-                    assert!(body.contains("event: error\n"), "{body}");
-                    assert_eq!(data["type"], "error");
-                    assert_eq!(data["message"], "busy");
-                }
-                _ => assert_eq!(data["error"]["message"], "busy", "{body}"),
-            }
-            assert_eq!(first.join().unwrap().0, 200);
-        });
-    }
-}
-
-#[test]
-fn a_reply_that_isnt_streamed_waits_quietly() {
-    let seen = Arc::new(Mutex::new(Seen { slow: Some(Duration::from_millis(500)), streams_header: Some("1".into()), ..Seen::default() }));
-    let (api_port, ca, pin) = fake_gateway(seen.clone());
-    let vars = [("PAI_TEST_QUEUE_OPEN_MS", "50")];
-    let (p, _relay) = start_with(api_port, &ca, &pin, &vars);
-    p.post("/v1/models", Some(&p.key), &[]);
-    std::thread::scope(|scope| {
-        let first = scope.spawn(|| p.post("/v1/messages", Some(&p.key), &[]));
-        std::thread::sleep(Duration::from_millis(150));
-        let (status, body) = p.post("/v1/messages", Some(&p.key), &[]);
-        assert_eq!((status, body), (200, serde_json::json!({"ok": true})));
-        assert_eq!(first.join().unwrap().0, 200);
-    });
+    assert_eq!(*order.lock().unwrap(), [0, 1, 2, 3, 4], "first come, first served");
+    assert_eq!(seen.lock().unwrap().most_open, 1);
 }
