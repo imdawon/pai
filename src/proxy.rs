@@ -529,7 +529,7 @@ impl Proxy {
         };
         // First come, first served, with no time limit: Tokio's semaphore serves waiters in the
         // order they came, and a request keeps its place until it has a stream or its coding tool
-        // leaves. (Before 0.1.23 a request that had waited 10 minutes rejoined at the back, behind
+        // leaves. (Before 0.1.24 a request that had waited 10 minutes rejoined at the back, behind
         // newer requests, and could wait for an hour; INCIDENTS.md, 2026-11-08.)
         streams.acquire_owned().await.map_err(|_| error(StatusCode::SERVICE_UNAVAILABLE, "stream_limit", "pai's queue closed. Try again."))
     }
