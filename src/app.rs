@@ -975,7 +975,7 @@ pub struct Status {
     pub problems: Vec<String>,
 }
 
-const SETUP_HINT: &str = "Run the command from Account > Set up a coding tool in the DawonAI web app, or `pai pair <code> --setup <claude-code|codex|opencode|omp|hermes>`";
+const SETUP_HINT: &str = "Run the command from Account > Set up a coding tool in the DawonAI web app, or `pai pair <code> --setup <claude-code|claude-desktop|codex|codex-app|opencode|omp|hermes>`";
 
 pub fn status(env: &Env) -> Result<Status> {
     let config = env.config()?;
@@ -1055,7 +1055,7 @@ pub fn status(env: &Env) -> Result<Status> {
         problems.push("This pai has no pins for the model API, so its proxy won't connect. Install pai again.".to_string());
     }
     if harnesses.is_empty() {
-        problems.push("No harness is set up. Run `pai setup <claude-code|codex|opencode|omp|hermes> --apply`.".to_string());
+        problems.push("No harness is set up. Run `pai setup <claude-code|claude-desktop|codex|codex-app|opencode|omp|hermes> --apply`.".to_string());
     }
     Ok(Status {
         pass_key: has_pass_key(env),

@@ -26,7 +26,7 @@ fn backups(dir: &std::path::Path) -> Vec<String> {
 #[test]
 fn print_mode_writes_nothing() {
     let t = TestEnv::new();
-    for tool in [Tool::ClaudeCode, Tool::Codex, Tool::Opencode, Tool::Omp, Tool::Hermes] {
+    for tool in [Tool::ClaudeCode, Tool::ClaudeDesktop, Tool::Codex, Tool::CodexApp, Tool::Opencode, Tool::Omp, Tool::Hermes] {
         let out = setup::run(&t.env, tool, &target(&t, 262144), false).unwrap();
         assert!(out.contains("127.0.0.1:47821"), "{out}");
     }
@@ -142,6 +142,108 @@ fn codex_adds_provider_and_profile() {
         1,
         "{again}"
     );
+}
+
+#[test]
+fn codex_app_makes_dawonai_the_default() {
+    let mut t = TestEnv::new();
+    t.env.clock = pai::app::Clock::Fixed(1_800_000_000);
+    let dir = t.home().join(".codex");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("config.toml"),
+        "# my settings\nmodel = \"gpt-5\"\napproval_policy = \"on-request\"\n\n[analytics]\nenabled = true\nother = 1\n\n[model_providers.other]\nname = \"Other\"\n",
+    )
+    .unwrap();
+    assert!(!setup::set_up_tools(&t.env).contains(&Tool::CodexApp));
+
+    let out = setup::run(&t.env, Tool::CodexApp, &target(&t, 131072), true).unwrap();
+    assert!(out.contains("Codex app"), "{out}");
+
+    let text = fs::read_to_string(dir.join("config.toml")).unwrap();
+    let doc: toml_edit::DocumentMut = text.parse().unwrap();
+    assert_eq!(doc["model_provider"].as_str(), Some("dawonai"), "{text}");
+    assert_eq!(doc["model"].as_str(), Some("qwen3.8-27b"));
+    assert_eq!(doc["model_context_window"].as_integer(), Some(131072));
+    assert_eq!(doc["web_search"].as_str(), Some("disabled"));
+    assert_eq!(doc["approval_policy"].as_str(), Some("on-request"));
+    assert_eq!(doc["analytics"]["enabled"].as_bool(), Some(false));
+    assert_eq!(doc["analytics"]["other"].as_integer(), Some(1));
+    assert_eq!(doc["model_providers"]["other"]["name"].as_str(), Some("Other"));
+    assert_eq!(doc["model_providers"]["dawonai"]["wire_api"].as_str(), Some("responses"));
+    // Top-level keys stay above the first table, or TOML would put them inside it.
+    let first_table = text.find('[').unwrap();
+    assert!(text.find("model_provider = ").unwrap() < first_table, "{text}");
+    assert!(dir.join("dawonai.config.toml").exists(), "the CLI profile still works");
+    assert!(setup::set_up_tools(&t.env).contains(&Tool::CodexApp));
+
+    // A new context limit is carried into the default.
+    t.env.clock = pai::app::Clock::Fixed(1_800_000_060);
+    setup::run(&t.env, Tool::CodexApp, &target(&t, 262144), true).unwrap();
+    let doc: toml_edit::DocumentMut = fs::read_to_string(dir.join("config.toml")).unwrap().parse().unwrap();
+    assert_eq!(doc["model_context_window"].as_integer(), Some(262144));
+
+    setup::undo(&t.env, Tool::CodexApp).unwrap();
+    let back = fs::read_to_string(dir.join("config.toml")).unwrap();
+    assert!(back.contains("model = \"gpt-5\"") && !back.contains("dawonai"), "{back}");
+}
+
+#[test]
+fn codex_cli_setup_leaves_the_default_alone() {
+    let t = TestEnv::new();
+    setup::run(&t.env, Tool::Codex, &target(&t, 65536), true).unwrap();
+    let doc: toml_edit::DocumentMut =
+        fs::read_to_string(t.home().join(".codex/config.toml")).unwrap().parse().unwrap();
+    assert!(doc.get("model_provider").is_none());
+    let tools = setup::set_up_tools(&t.env);
+    assert!(tools.contains(&Tool::Codex) && !tools.contains(&Tool::CodexApp));
+}
+
+#[test]
+fn claude_desktop_adds_and_applies_a_gateway_configuration() {
+    let t = TestEnv::new();
+    let lib = t.home().join(".config/Claude-3p/configLibrary");
+    fs::create_dir_all(&lib).unwrap();
+    fs::write(
+        lib.join("_meta.json"),
+        r#"{"appliedId":"aaaa","entries":[{"id":"aaaa","name":"Work"}]}"#,
+    )
+    .unwrap();
+    fs::write(lib.join("aaaa.json"), r#"{"inferenceProvider":"vertex"}"#).unwrap();
+
+    setup::run(&t.env, Tool::ClaudeDesktop, &target(&t, 131072), true).unwrap();
+
+    let id = setup::CLAUDE_DESKTOP_ID;
+    let meta: Value = serde_json::from_str(&fs::read_to_string(lib.join("_meta.json")).unwrap()).unwrap();
+    assert_eq!(meta["appliedId"], id);
+    let entries = meta["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["name"], "Work");
+    assert_eq!(entries[1]["id"], id);
+    assert_eq!(entries[1]["name"], "DawonAI");
+
+    let c: Value = serde_json::from_str(&fs::read_to_string(lib.join(format!("{id}.json"))).unwrap()).unwrap();
+    assert_eq!(c["inferenceProvider"], "gateway");
+    assert_eq!(c["inferenceGatewayBaseUrl"], "http://127.0.0.1:47821");
+    assert_eq!(c["inferenceCredentialKind"], "helper-script");
+    assert_eq!(c["inferenceCredentialHelper"], "/opt/pai/bin/pai");
+    assert_eq!(c["inferenceCredentialHelperArgs"][0], "token");
+    assert_eq!(c["inferenceModels"][0]["name"], "qwen3.8-27b");
+    assert_eq!(c["inferenceModels"][0]["labelOverride"], "DawonAI");
+    assert!(t.home().join(".claude/skills/dawonai/SKILL.md").exists());
+    assert!(setup::set_up_tools(&t.env).contains(&Tool::ClaudeDesktop));
+
+    // Again: still one DawonAI entry, nothing rewritten.
+    setup::run(&t.env, Tool::ClaudeDesktop, &target(&t, 131072), true).unwrap();
+    let meta: Value = serde_json::from_str(&fs::read_to_string(lib.join("_meta.json")).unwrap()).unwrap();
+    assert_eq!(meta["entries"].as_array().unwrap().len(), 2);
+    assert_eq!(backups(&lib).len(), 1);
+
+    setup::undo(&t.env, Tool::ClaudeDesktop).unwrap();
+    let meta: Value = serde_json::from_str(&fs::read_to_string(lib.join("_meta.json")).unwrap()).unwrap();
+    assert_eq!(meta["appliedId"], "aaaa");
+    assert!(!lib.join(format!("{id}.json")).exists());
+    assert!(lib.join("aaaa.json").exists());
 }
 
 #[test]
@@ -348,8 +450,8 @@ const SKILL: &str = include_str!("../skill/dawonai/SKILL.md");
 /// The skill's file under the test home, for each harness with default settings.
 fn skill_file(t: &TestEnv, tool: Tool) -> std::path::PathBuf {
     let root = match tool {
-        Tool::ClaudeCode => t.home().join(".claude/skills"),
-        Tool::Codex => t.home().join(".agents/skills"),
+        Tool::ClaudeCode | Tool::ClaudeDesktop => t.home().join(".claude/skills"),
+        Tool::Codex | Tool::CodexApp => t.home().join(".agents/skills"),
         Tool::Opencode => t.home().join(".config/opencode/skills"),
         Tool::Omp => t.home().join(".omp/agent/skills"),
         Tool::Hermes => t.home().join(".hermes/skills"),
@@ -358,7 +460,15 @@ fn skill_file(t: &TestEnv, tool: Tool) -> std::path::PathBuf {
     root.join("dawonai").join("SKILL.md")
 }
 
-const TOOLS: [Tool; 5] = [Tool::ClaudeCode, Tool::Codex, Tool::Opencode, Tool::Omp, Tool::Hermes];
+const TOOLS: [Tool; 7] = [
+    Tool::ClaudeCode,
+    Tool::ClaudeDesktop,
+    Tool::Codex,
+    Tool::CodexApp,
+    Tool::Opencode,
+    Tool::Omp,
+    Tool::Hermes,
+];
 
 #[test]
 fn skill_is_named_dawonai() {
