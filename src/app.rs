@@ -473,6 +473,13 @@ pub fn held_plan(env: &Env) -> Option<Plan> {
 
 /// Serializes credential fetches across processes: tools start several `pai token` at once,
 /// and each device may only collect a few credentials a day.
+/// Removes the plain secrets file an older pai left beside the sealed one, once no proxy that
+/// older pai started can still be reading it (`Keystore::drop_plain_copy`).
+pub fn drop_plain_copy(env: &Env) -> Result<bool> {
+    let _lock = lock(env)?;
+    env.keystore.drop_plain_copy()
+}
+
 fn lock(env: &Env) -> Result<fs::File> {
     let dir = &env.paths.config_dir;
     fs::create_dir_all(dir).map_err(|e| io_err("create", dir, e))?;
