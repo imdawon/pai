@@ -32,8 +32,9 @@ pub enum Keystore {
     File(PathBuf),
     /// `secrets.sealed` beside the given `secrets.json` path, sealed by the Secure Enclave (macOS)
     /// or DPAPI (Windows): it opens only on this computer, for this user, with no prompt
-    /// (src/sealed.rs). A `secrets.json` left by an older pai is sealed and removed the first time
-    /// it's read.
+    /// (src/sealed.rs). A `secrets.json` left by an older pai is sealed the first time it's read,
+    /// and removed only by `drop_plain_copy`, once no proxy started by that older pai can still be
+    /// reading it.
     Sealed(PathBuf, crate::sealed::Kind),
 }
 
@@ -112,6 +113,10 @@ impl Keystore {
                 Ok(())
             }
             Keystore::Sealed(path, kind) => {
+                // The plain copy an older pai left goes too, or the next read would seal it again.
+                if path.exists() {
+                    Keystore::File(path.clone()).delete(name)?;
+                }
                 let mut map = read_sealed(path, *kind)?;
                 if map.remove(name).is_some() {
                     if map.is_empty() {
@@ -125,10 +130,39 @@ impl Keystore {
             }
         }
     }
+
+    /// Seals what a plain `secrets.json` beside the sealed file still holds, then removes it. A proxy
+    /// started by pai before 0.1.22 reads only that plain file, and keeps running after an update
+    /// until it's replaced, so the file stays until then: removing it at once made that proxy answer
+    /// "can't find its device key" (privacy-ai docs/INCIDENTS.md, 2026-11-10). Values in the sealed
+    /// file win; the plain file adds only what the sealed one lacks. Returns whether a file was
+    /// removed.
+    pub fn drop_plain_copy(&self) -> Result<bool> {
+        let Keystore::Sealed(json, kind) = self else { return Ok(false) };
+        if !json.exists() {
+            return Ok(false);
+        }
+        let plain = read_file(json)?;
+        let path = sealed::sealed_path(json);
+        let mut map = if path.exists() { read_sealed_only(&path)? } else { SecretMap::default() };
+        let before = map.len();
+        for (name, value) in plain.iter() {
+            map.entry(name.clone()).or_insert_with(|| value.clone());
+        }
+        if map.len() != before {
+            write_sealed(json, *kind, &map)?;
+        }
+        // Removed only once the sealed copy is known to open and to hold everything.
+        if !map.is_empty() && read_sealed_only(&path)?.0 != map.0 {
+            return Err(Error::Keystore(format!("{} didn't keep what pai sealed", path.display())));
+        }
+        fs::remove_file(json).map_err(|e| io_err("remove", json, e))?;
+        Ok(true)
+    }
 }
 
 /// The sealed file's secrets. Without one, the plain `secrets.json` an older pai left (or none),
-/// which is sealed and then removed, once the sealed copy is known to open.
+/// sealed here and left in place for that pai's proxy (`Keystore::drop_plain_copy`).
 fn read_sealed(json: &Path, kind: sealed::Kind) -> Result<SecretMap> {
     let path = sealed::sealed_path(json);
     match fs::read(&path) {
@@ -142,9 +176,6 @@ fn read_sealed(json: &Path, kind: sealed::Kind) -> Result<SecretMap> {
             let map = read_file(json)?;
             if !map.is_empty() {
                 write_sealed(json, kind, &map)?;
-                if read_sealed_only(&path)?.0 == map.0 {
-                    fs::remove_file(json).map_err(|e| io_err("remove", json, e))?;
-                }
             }
             Ok(map)
         }
@@ -314,10 +345,13 @@ fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
         .parent()
         .ok_or_else(|| Error::Io(format!("bad secrets path {}", path.display())))?;
     fs::create_dir_all(dir).map_err(|e| io_err("create", dir, e))?;
+    // A name of its own for each write: with one shared name, two writers at once (the new pai
+    // sealing an older pai's file while its proxy reads) removed each other's file.
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".tmp");
+    name.push(format!(".{}.{n}.tmp", std::process::id()));
     let tmp = path.with_file_name(name);
-    let _ = fs::remove_file(&tmp);
     let mut opts = fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
@@ -327,11 +361,90 @@ fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
         opts.mode(0o600);
     }
     let mut f = opts.open(&tmp).map_err(|e| io_err("create", &tmp, e))?;
-    f.write_all(bytes)
-        .and_then(|_| f.sync_all())
-        .map_err(|e| io_err("write", &tmp, e))?;
+    let written = f.write_all(bytes).and_then(|_| f.sync_all());
     drop(f);
-    fs::rename(&tmp, path).map_err(|e| io_err("write", path, e))
+    if let Err(e) = written.and_then(|_| fs::rename(&tmp, path)) {
+        let _ = fs::remove_file(&tmp);
+        return Err(io_err("write", path, e));
+    }
+    Ok(())
+}
+
+/// The sealed file beside a plain one an older pai left. `Kind::Dpapi` stands in for both kinds:
+/// off Windows, tests seal with a stand-in that keeps the bytes (src/sealed.rs).
+#[cfg(test)]
+mod plain_copy_tests {
+    use super::*;
+
+    fn stores() -> (tempfile::TempDir, PathBuf, Keystore, Keystore) {
+        let dir = tempfile::tempdir().unwrap();
+        let json = dir.path().join("secrets.json");
+        let old = Keystore::File(json.clone());
+        old.set(DEVICE_KEY, "device").unwrap();
+        old.set(CREDENTIAL, "today").unwrap();
+        let new = Keystore::Sealed(json.clone(), sealed::Kind::Dpapi);
+        (dir, json, old, new)
+    }
+
+    #[test]
+    fn a_proxy_from_an_older_pai_still_finds_its_secrets_after_the_new_pai_seals_them() {
+        let (_dir, json, old, new) = stores();
+        assert_eq!(new.get(DEVICE_KEY).unwrap().as_deref().map(|s| s.as_str()), Some("device"));
+        assert!(sealed::sealed_path(&json).exists());
+        // The old proxy reads only the plain file, as pai before 0.1.22 does.
+        assert_eq!(old.get(DEVICE_KEY).unwrap().as_deref().map(|s| s.as_str()), Some("device"));
+        assert_eq!(new.get(DEVICE_KEY).unwrap().as_deref().map(|s| s.as_str()), Some("device"));
+    }
+
+    #[test]
+    fn dropping_the_plain_copy_keeps_what_the_older_proxy_added() {
+        let (_dir, json, old, new) = stores();
+        new.get(DEVICE_KEY).unwrap();
+        new.set(CREDENTIAL, "sealed today").unwrap();
+        old.set(CREDENTIAL, "plain today").unwrap();
+        old.set(NEXT_CREDENTIAL, "tomorrow").unwrap();
+        assert!(new.drop_plain_copy().unwrap());
+        assert!(!json.exists());
+        assert_eq!(new.get(CREDENTIAL).unwrap().as_deref().map(|s| s.as_str()), Some("sealed today"));
+        assert_eq!(new.get(NEXT_CREDENTIAL).unwrap().as_deref().map(|s| s.as_str()), Some("tomorrow"));
+        assert_eq!(new.get(DEVICE_KEY).unwrap().as_deref().map(|s| s.as_str()), Some("device"));
+        assert!(!new.drop_plain_copy().unwrap());
+    }
+
+    #[test]
+    fn dropping_the_plain_copy_seals_it_when_nothing_was_sealed_yet() {
+        let (_dir, json, _old, new) = stores();
+        assert!(new.drop_plain_copy().unwrap());
+        assert!(!json.exists());
+        assert_eq!(new.get(DEVICE_KEY).unwrap().as_deref().map(|s| s.as_str()), Some("device"));
+    }
+
+    #[test]
+    fn a_deleted_secret_doesnt_come_back_from_the_plain_copy() {
+        let (_dir, json, old, new) = stores();
+        new.get(DEVICE_KEY).unwrap();
+        for name in [DEVICE_KEY, CREDENTIAL] {
+            new.delete(name).unwrap();
+        }
+        assert!(!sealed::sealed_path(&json).exists());
+        assert_eq!(old.get(DEVICE_KEY).unwrap(), None);
+        assert_eq!(new.get(DEVICE_KEY).unwrap(), None);
+    }
+
+    /// The new pai and readers that run at the same time never see the device key missing.
+    #[test]
+    fn readers_never_see_the_device_key_missing_while_it_is_sealed() {
+        for _ in 0..50 {
+            let (_dir, _json, old, new) = stores();
+            let handles: Vec<_> = (0..8)
+                .map(|i| {
+                    let store = if i % 2 == 0 { new.clone() } else { old.clone() };
+                    std::thread::spawn(move || store.get(DEVICE_KEY).unwrap().is_some())
+                })
+                .collect();
+            assert!(handles.into_iter().all(|h| h.join().unwrap()));
+        }
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
