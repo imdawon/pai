@@ -228,7 +228,9 @@ fn claude_desktop_adds_and_applies_a_gateway_configuration() {
     assert_eq!(c["inferenceCredentialKind"], "helper-script");
     assert_eq!(c["inferenceCredentialHelper"], "/opt/pai/bin/pai");
     assert_eq!(c["inferenceCredentialHelperArgs"][0], "token");
-    assert_eq!(c["inferenceModels"][0]["name"], "qwen3.8-27b");
+    // The app drops a gateway model whose name it can't read as Anthropic's, such as "qwen...".
+    assert_eq!(c["inferenceModels"][0]["name"], "claude-dawonai");
+    assert_eq!(c["inferenceModels"][0]["behavesAs"], "claude-sonnet-5");
     assert_eq!(c["inferenceModels"][0]["labelOverride"], "DawonAI");
     assert!(t.home().join(".claude/skills/dawonai/SKILL.md").exists());
     assert!(setup::set_up_tools(&t.env).contains(&Tool::ClaudeDesktop));

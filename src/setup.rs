@@ -758,6 +758,12 @@ const CLAUDE_DESKTOP_NAME: &str = "DawonAI";
 /// What the app is told the model behaves like. It shows only models it can place as Claude, and a
 /// gateway alias names the Claude model it stands in for (`behavesAs`).
 const CLAUDE_DESKTOP_BEHAVES_AS: &str = "claude-sonnet-5";
+/// The model name the app is given. For a gateway, the app keeps only names it reads as an
+/// Anthropic model: one that contains "claude" (or a tier name) and none of the names it knows
+/// for other models, such as "qwen" (checked in Claude desktop 5.11492.5). It drops
+/// "qwen3.8-27b" from the list. The gateway answers with its own model whatever name a request
+/// carries.
+pub const CLAUDE_DESKTOP_MODEL: &str = "claude-dawonai";
 
 fn claude_desktop_dir(env: &Env) -> PathBuf {
     if cfg!(windows) {
@@ -790,7 +796,7 @@ fn claude_desktop_config(t: &Target) -> Value {
         "inferenceCredentialHelperArgs": ["token"],
         "inferenceCredentialHelperTtlSec": 3600,
         "inferenceModels": [{
-            "name": MODEL,
+            "name": CLAUDE_DESKTOP_MODEL,
             "labelOverride": CLAUDE_DESKTOP_NAME,
             "behavesAs": CLAUDE_DESKTOP_BEHAVES_AS,
         }],
@@ -808,7 +814,7 @@ fn claude_desktop_print(env: &Env, t: &Target) -> String {
          and set \"appliedId\" to \"{CLAUDE_DESKTOP_ID}\".\n\n\
          Or enter the same values in the Claude app: Help > Troubleshooting > Enable Developer Mode, then Developer > \
          Configure Third-Party Inference. Inference provider: Gateway. Gateway base URL: {}. Credential: helper \
-         script {} with the argument `token`. Model: {MODEL}.\n\n{}\
+         script {} with the argument `token`. Model: {CLAUDE_DESKTOP_MODEL}.\n\n{}\
          Run `pai setup claude-desktop --apply` to write them, then quit and reopen the Claude app. On its sign-in \
          screen, choose to start with third-party inference.\n",
         lib.join(format!("{CLAUDE_DESKTOP_ID}.json")).display(),
