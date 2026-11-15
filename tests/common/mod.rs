@@ -244,6 +244,8 @@ fn handle(
                 brave_web_search_privacy_accepted_at: None,
                 refund_until: None,
                 pending_plan: None,
+                free_trial_until: None,
+                free_trial_refused: None,
             })
         }
         ("GET", "/v1/keys") => ok(IssuerKeys {
