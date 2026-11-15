@@ -16,8 +16,16 @@ const SKILL: &str = include_str!("../skill/dawonai/SKILL.md");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Tool {
+    /// Claude Code in a terminal, the VS Code extension and JetBrains: ~/.claude/settings.json.
     ClaudeCode,
+    /// The Code tab of the Claude desktop app, which takes its gateway from its own third-party
+    /// inference settings instead of settings.json.
+    ClaudeDesktop,
+    /// The Codex CLI, started with `codex --profile dawonai`.
     Codex,
+    /// The Codex app: DawonAI as Codex's default model, since the app has no `--profile`. Plain
+    /// `codex` in a terminal uses DawonAI too.
+    CodexApp,
     Opencode,
     Omp,
     Hermes,
@@ -117,8 +125,12 @@ pub fn run(env: &Env, tool: Tool, target: &Target, apply: bool) -> Result<String
     let body = match (tool, apply) {
         (Tool::ClaudeCode, false) => claude_print(env, target),
         (Tool::ClaudeCode, true) => claude_apply(env, target)?,
-        (Tool::Codex, false) => codex_print(env, target),
-        (Tool::Codex, true) => codex_apply(env, target)?,
+        (Tool::ClaudeDesktop, false) => claude_desktop_print(env, target),
+        (Tool::ClaudeDesktop, true) => claude_desktop_apply(env, target)?,
+        (Tool::Codex, false) => codex_print(env, target, false),
+        (Tool::Codex, true) => codex_apply(env, target, false)?,
+        (Tool::CodexApp, false) => codex_print(env, target, true),
+        (Tool::CodexApp, true) => codex_apply(env, target, true)?,
         (Tool::Opencode, false) => opencode_print(env, target),
         (Tool::Opencode, true) => opencode_apply(env, target)?,
         (Tool::Omp, false) => omp_print(env, target),
@@ -249,10 +261,11 @@ fn js_rewrite(source: &str, target: &Target) -> String {
 pub fn skill_path(env: &Env, tool: Tool) -> PathBuf {
     let root = match tool {
         // https://code.claude.com/docs/en/skills, /claude-directory
-        Tool::ClaudeCode => claude_dir(env).join("skills"),
+        // The desktop app's Code tab reads the same personal skills.
+        Tool::ClaudeCode | Tool::ClaudeDesktop => claude_dir(env).join("skills"),
         // https://learn.chatgpt.com/docs/build-skills lists $HOME/.agents/skills for user skills.
         // CODEX_HOME doesn't move it; $CODEX_HOME/skills is still read but deprecated.
-        Tool::Codex => env.paths.home.join(".agents").join("skills"),
+        Tool::Codex | Tool::CodexApp => env.paths.home.join(".agents").join("skills"),
         // https://opencode.ai/docs/skills/
         Tool::Opencode => opencode_dir(env).join("skills"),
         // oh-my-pi docs/skills.md
@@ -269,7 +282,9 @@ impl Tool {
     pub fn cli_name(self) -> &'static str {
         match self {
             Tool::ClaudeCode => "claude-code",
+            Tool::ClaudeDesktop => "claude-desktop",
             Tool::Codex => "codex",
+            Tool::CodexApp => "codex-app",
             Tool::Opencode => "opencode",
             Tool::Omp => "omp",
             Tool::Hermes => "hermes",
@@ -280,7 +295,9 @@ impl Tool {
     pub fn display_name(self) -> &'static str {
         match self {
             Tool::ClaudeCode => "Claude Code",
+            Tool::ClaudeDesktop => "the Claude desktop app",
             Tool::Codex => "Codex",
+            Tool::CodexApp => "the Codex app",
             Tool::Opencode => "OpenCode",
             Tool::Omp => "OMP",
             Tool::Hermes => "Hermes",
@@ -294,7 +311,11 @@ impl Tool {
 fn applied_files(env: &Env, tool: Tool) -> (Vec<PathBuf>, Vec<PathBuf>) {
     match tool {
         Tool::ClaudeCode => (vec![claude_settings_path(env)], vec![]),
-        Tool::Codex => (
+        Tool::ClaudeDesktop => (
+            vec![claude_desktop_library(env).join("_meta.json")],
+            vec![claude_desktop_library(env).join(format!("{CLAUDE_DESKTOP_ID}.json"))],
+        ),
+        Tool::Codex | Tool::CodexApp => (
             vec![codex_dir(env).join("config.toml")],
             vec![codex_dir(env).join(format!("{PROVIDER_ID}.config.toml"))],
         ),
@@ -308,7 +329,15 @@ fn applied_files(env: &Env, tool: Tool) -> (Vec<PathBuf>, Vec<PathBuf>) {
     }
 }
 
-const TOOLS: [Tool; 5] = [Tool::ClaudeCode, Tool::Codex, Tool::Opencode, Tool::Omp, Tool::Hermes];
+const TOOLS: [Tool; 7] = [
+    Tool::ClaudeCode,
+    Tool::ClaudeDesktop,
+    Tool::Codex,
+    Tool::CodexApp,
+    Tool::Opencode,
+    Tool::Omp,
+    Tool::Hermes,
+];
 
 /// Whether a tool's config file has pai's settings in it: the provider pai adds, or (Claude Code,
 /// which has no providers) pai as its API key command.
@@ -318,6 +347,14 @@ fn has_pai_settings(env: &Env, text: &str) -> bool {
 
 /// Whether `pai setup <tool> --apply` has set this tool up and it's still set up.
 fn is_set_up(env: &Env, tool: Tool) -> bool {
+    match tool {
+        // The Codex app shares the CLI's files; it's set up when DawonAI is the default provider.
+        Tool::CodexApp => return codex_default_is_ours(env),
+        Tool::ClaudeDesktop => {
+            return claude_desktop_library(env).join(format!("{CLAUDE_DESKTOP_ID}.json")).exists();
+        }
+        _ => {}
+    }
     let (changed, added) = applied_files(env, tool);
     changed.iter().any(|p| fs::read_to_string(p).is_ok_and(|t| has_pai_settings(env, &t))) || added.iter().any(|p| p.exists())
 }
@@ -579,20 +616,51 @@ fn codex_profile_toml(t: &Target) -> String {
     )
 }
 
-fn codex_print(env: &Env, t: &Target) -> String {
+/// The profile's settings, set at the top of config.toml so they're Codex's defaults. The Codex app
+/// reads only the top level of config.toml; it can't be started with `--profile`.
+/// https://learn.chatgpt.com/docs/config-file/config-basic
+fn codex_default_toml(t: &Target) -> String {
+    codex_profile_toml(t)
+}
+
+fn codex_default_is_ours(env: &Env) -> bool {
+    fs::read_to_string(codex_dir(env).join("config.toml"))
+        .ok()
+        .and_then(|t| t.parse::<toml_edit::DocumentMut>().ok())
+        .is_some_and(|d| d.get("model_provider").and_then(|v| v.as_str()) == Some(PROVIDER_ID))
+}
+
+fn codex_print(env: &Env, t: &Target, app: bool) -> String {
     let dir = codex_dir(env);
-    format!(
-        "Add to {}:\n\n{}\nWrite {}:\n\n{}\n{}Run `pai setup codex --apply` to write all three, then start Codex with \
-         `codex --profile {PROVIDER_ID}`.\n",
+    let mut out = format!(
+        "Add to {}:\n\n{}\n",
         dir.join("config.toml").display(),
-        codex_provider_toml(t),
+        codex_provider_toml(t)
+    );
+    if app {
+        out.push_str(&format!(
+            "And at the top of {}, before any [table], so DawonAI is Codex's default:\n\n{}\n",
+            dir.join("config.toml").display(),
+            codex_default_toml(t)
+        ));
+    }
+    out.push_str(&format!(
+        "Write {}:\n\n{}\n{}",
         dir.join(format!("{PROVIDER_ID}.config.toml")).display(),
         codex_profile_toml(t),
         skill_print(env, Tool::Codex),
-    )
+    ));
+    if app {
+        out.push_str("Run `pai setup codex-app --apply` to write all three, then quit and reopen the Codex app.\n");
+    } else {
+        out.push_str(&format!(
+            "Run `pai setup codex --apply` to write all three, then start Codex with `codex --profile {PROVIDER_ID}`.\n"
+        ));
+    }
+    out
 }
 
-fn codex_apply(env: &Env, t: &Target) -> Result<String> {
+fn codex_apply(env: &Env, t: &Target, app: bool) -> Result<String> {
     use toml_edit::{DocumentMut, Item, Table};
     let dir = codex_dir(env);
     let path = dir.join("config.toml");
@@ -638,6 +706,29 @@ fn codex_apply(env: &Env, t: &Target) -> Result<String> {
     })?;
     providers.insert(PROVIDER_ID, snippet["model_providers"][PROVIDER_ID].clone());
 
+    if app {
+        let defaults: DocumentMut = codex_default_toml(t).parse().expect("default TOML parses");
+        for (key, item) in defaults.iter() {
+            match (doc.get_mut(key).and_then(Item::as_table_like_mut), item.as_table_like()) {
+                // A table such as [analytics]: set pai's keys, keep the person's others.
+                (Some(have), Some(ours)) => {
+                    for (k, v) in ours.iter() {
+                        have.insert(k, v.clone());
+                    }
+                }
+                // A key already there keeps its place and the comments around it.
+                _ => match (doc.get_mut(key).and_then(Item::as_value_mut), item.as_value()) {
+                    (Some(have), Some(ours)) => {
+                        let decor = have.decor().clone();
+                        *have = ours.clone();
+                        *have.decor_mut() = decor;
+                    }
+                    _ => doc[key] = item.clone(),
+                },
+            }
+        }
+    }
+
     let now = env.clock.now();
     write_file(&path, &doc.to_string(), now, &mut log)?;
     write_file(
@@ -647,9 +738,110 @@ fn codex_apply(env: &Env, t: &Target) -> Result<String> {
         &mut log,
     )?;
     skill_apply(env, Tool::Codex, &mut log)?;
-    log.push_str(&format!(
-        "Start Codex with `codex --profile {PROVIDER_ID}` to use DawonAI.\n"
-    ));
+    if app {
+        log.push_str("DawonAI is now Codex's default model. Quit and reopen the Codex app to use it. Plain `codex` in a terminal uses DawonAI too.\n");
+    } else {
+        log.push_str(&format!("Start Codex with `codex --profile {PROVIDER_ID}` to use DawonAI.\n"));
+    }
+    Ok(log)
+}
+
+// The Claude desktop app's Code tab: https://claude.com/docs/third-party/claude-desktop/gateway,
+// /configuration, /configuration-format. The app keeps third-party inference settings as saved
+// configurations in Claude-3p/configLibrary: `_meta.json` names the one applied, and each
+// configuration is `<id>.json` beside it. pai adds its own and applies it. A configuration an
+// administrator installs (MDM) wins over this one.
+
+/// The id of pai's saved configuration, fixed so running setup again updates the same one.
+pub const CLAUDE_DESKTOP_ID: &str = "00000000-0000-4000-8000-00000da30a10";
+const CLAUDE_DESKTOP_NAME: &str = "DawonAI";
+/// What the app is told the model behaves like. It shows only models it can place as Claude, and a
+/// gateway alias names the Claude model it stands in for (`behavesAs`).
+const CLAUDE_DESKTOP_BEHAVES_AS: &str = "claude-sonnet-5";
+
+fn claude_desktop_dir(env: &Env) -> PathBuf {
+    if cfg!(windows) {
+        if let Some(local) = env.var("LOCALAPPDATA") {
+            return PathBuf::from(local).join("Claude-3p");
+        }
+        return env.paths.home.join("AppData").join("Local").join("Claude-3p");
+    }
+    if cfg!(target_os = "macos") {
+        return env.paths.home.join("Library").join("Application Support").join("Claude-3p");
+    }
+    match env.var("XDG_CONFIG_HOME").filter(|d| Path::new(d).is_absolute()) {
+        Some(d) => PathBuf::from(d).join("Claude-3p"),
+        None => env.paths.home.join(".config").join("Claude-3p"),
+    }
+}
+
+fn claude_desktop_library(env: &Env) -> PathBuf {
+    claude_desktop_dir(env).join("configLibrary")
+}
+
+fn claude_desktop_config(t: &Target) -> Value {
+    let mut v = json!({
+        "inferenceProvider": "gateway",
+        "inferenceGatewayBaseUrl": t.base_url,
+        "inferenceGatewayAuthScheme": "x-api-key",
+        // The app runs `pai token` for the key, as Claude Code runs apiKeyHelper.
+        "inferenceCredentialKind": "helper-script",
+        "inferenceCredentialHelper": t.pai_bin,
+        "inferenceCredentialHelperArgs": ["token"],
+        "inferenceCredentialHelperTtlSec": 3600,
+        "inferenceModels": [{
+            "name": MODEL,
+            "labelOverride": CLAUDE_DESKTOP_NAME,
+            "behavesAs": CLAUDE_DESKTOP_BEHAVES_AS,
+        }],
+    });
+    if cfg!(windows) {
+        v["inferenceCredentialHelperWindows"] = json!(t.pai_bin);
+    }
+    v
+}
+
+fn claude_desktop_print(env: &Env, t: &Target) -> String {
+    let lib = claude_desktop_library(env);
+    format!(
+        "Write {}:\n\n{}\nIn {}, add {{\"id\": \"{CLAUDE_DESKTOP_ID}\", \"name\": \"{CLAUDE_DESKTOP_NAME}\"}} to \"entries\" \
+         and set \"appliedId\" to \"{CLAUDE_DESKTOP_ID}\".\n\n\
+         Or enter the same values in the Claude app: Help > Troubleshooting > Enable Developer Mode, then Developer > \
+         Configure Third-Party Inference. Inference provider: Gateway. Gateway base URL: {}. Credential: helper \
+         script {} with the argument `token`. Model: {MODEL}.\n\n{}\
+         Run `pai setup claude-desktop --apply` to write them, then quit and reopen the Claude app. On its sign-in \
+         screen, choose to start with third-party inference.\n",
+        lib.join(format!("{CLAUDE_DESKTOP_ID}.json")).display(),
+        pretty(&claude_desktop_config(t)),
+        lib.join("_meta.json").display(),
+        t.base_url,
+        t.pai_bin,
+        skill_print(env, Tool::ClaudeDesktop),
+    )
+}
+
+fn claude_desktop_apply(env: &Env, t: &Target) -> Result<String> {
+    let lib = claude_desktop_library(env);
+    let meta_path = lib.join("_meta.json");
+    let mut meta = read_json_object(&meta_path)?;
+    let mut entries = match meta.remove("entries") {
+        Some(Value::Array(a)) => a,
+        _ => Vec::new(),
+    };
+    entries.retain(|e| e.get("id").and_then(Value::as_str) != Some(CLAUDE_DESKTOP_ID));
+    entries.push(json!({ "id": CLAUDE_DESKTOP_ID, "name": CLAUDE_DESKTOP_NAME }));
+    meta.insert("appliedId".into(), json!(CLAUDE_DESKTOP_ID));
+    meta.insert("entries".into(), Value::Array(entries));
+
+    let now = env.clock.now();
+    let mut log = String::new();
+    write_file(&lib.join(format!("{CLAUDE_DESKTOP_ID}.json")), &pretty(&claude_desktop_config(t)), now, &mut log)?;
+    write_file(&meta_path, &pretty(&Value::Object(meta)), now, &mut log)?;
+    skill_apply(env, Tool::ClaudeDesktop, &mut log)?;
+    log.push_str(
+        "Quit and reopen the Claude app. On its sign-in screen, choose to start with third-party inference: the Code \
+         tab then runs on DawonAI. To use your Claude account again, sign in to Claude on that screen.\n",
+    );
     Ok(log)
 }
 

@@ -66,8 +66,10 @@ Dashes, spaces and lowercase are fine. If `pai` says the code is wrong or expire
 
 | You are | Run |
 |---|---|
-| Claude Code | `pai setup claude-code --apply` |
-| Codex | `pai setup codex --apply` |
+| Claude Code in a terminal or an editor | `pai setup claude-code --apply` |
+| Claude Code in the Claude desktop app | `pai setup claude-desktop --apply` |
+| Codex CLI | `pai setup codex --apply` |
+| Codex app | `pai setup codex-app --apply` |
 | OpenCode | `pai setup opencode --apply` |
 | OMP (oh-my-pi) | `pai setup omp --apply` |
 | Hermes Agent | `pai setup hermes --apply` |

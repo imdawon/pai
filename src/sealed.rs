@@ -489,9 +489,16 @@ fn dpapi(input: &[u8], protect: bool) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(any(test, feature = "test-mode"))))]
 fn dpapi(_input: &[u8], _protect: bool) -> Result<Vec<u8>> {
     Err(Error::Keystore("DPAPI is Windows only".into()))
+}
+
+/// Tests on other systems: a stand-in that keeps the bytes as they are, so the sealed file's
+/// handling can be tested there. Release builds leave out `test-mode`.
+#[cfg(all(not(windows), any(test, feature = "test-mode")))]
+fn dpapi(input: &[u8], _protect: bool) -> Result<Vec<u8>> {
+    Ok(input.to_vec())
 }
 
 #[cfg(test)]

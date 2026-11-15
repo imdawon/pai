@@ -24,6 +24,12 @@ fn main() {
             "-static",
             "-parse-as-library",
             "-O",
+            // No back-deployment shims (swiftCompatibility56, swiftCompatibilityConcurrency): this
+            // file uses no feature that needs them, and they live in the toolchain, not the SDK. The
+            // release Mac's build VM has only the command line tools, where the x86_64 link failed
+            // on them (pai 0.1.24, 2026-11-09).
+            "-runtime-compatibility-version",
+            "none",
         ])
         .args(["-module-name", "PaiSecureEnclave", "-target"])
         .arg(format!("{arch}-apple-macos11"))
@@ -52,23 +58,6 @@ fn main() {
         sdk.trim()
     );
     println!("cargo:rustc-link-search=native=/usr/lib/swift");
-    // The static back-deployment shims (swiftCompatibility56, swiftCompatibilityConcurrency, ...)
-    // that swiftc auto-links for a macOS 11 target ship only in the toolchain, next to swiftc.
-    let swiftc = String::from_utf8(
-        Command::new("xcrun")
-            .args(["--find", "swiftc"])
-            .output()
-            .expect("xcrun --find swiftc")
-            .stdout,
-    )
-    .unwrap();
-    let toolchain = PathBuf::from(swiftc.trim());
-    let shims = toolchain
-        .parent()
-        .and_then(|bin| bin.parent())
-        .expect("pai: swiftc path")
-        .join("lib/swift/macosx");
-    println!("cargo:rustc-link-search=native={}", shims.display());
     println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
     for lib in ["swiftCore", "swiftFoundation"] {
         println!("cargo:rustc-link-lib=dylib={lib}");

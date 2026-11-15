@@ -231,6 +231,7 @@ pub fn run(env: Env) -> Result<()> {
             tokio::spawn(prefetch_loop(proxy.env.clone()));
         }
         tokio::spawn(update_loop(proxy.clone()));
+        tokio::spawn(drop_plain_copy_later(proxy.env.clone()));
         let app = Router::new().fallback(handle).with_state(proxy.clone());
         let stopping = proxy.clone();
         axum::serve(listener, app)
@@ -252,6 +253,20 @@ pub fn run(env: Env) -> Result<()> {
         Some((env, handover)) => restart_proxy(&env, handover),
         None => Ok(()),
     }
+}
+
+/// How long a new proxy waits before removing the plain secrets file a pai before 0.1.22 left: the
+/// proxy it replaced reads only that file, and may still be finishing answers. privacy-ai
+/// docs/SETTINGS.md, "Plain secrets file kept after sealing".
+const PLAIN_COPY_GRACE: Duration = Duration::from_secs(600);
+
+async fn drop_plain_copy_later(env: Env) {
+    #[cfg(feature = "test-mode")]
+    let grace = env.var("PAI_TEST_PLAIN_COPY_GRACE").and_then(|v| v.parse().ok()).map_or(PLAIN_COPY_GRACE, Duration::from_secs);
+    #[cfg(not(feature = "test-mode"))]
+    let grace = PLAIN_COPY_GRACE;
+    tokio::time::sleep(grace).await;
+    let _ = tokio::task::spawn_blocking(move || app::drop_plain_copy(&env)).await;
 }
 
 fn modified(path: &std::path::Path) -> Option<std::time::SystemTime> {

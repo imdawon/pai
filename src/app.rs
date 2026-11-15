@@ -473,6 +473,13 @@ pub fn held_plan(env: &Env) -> Option<Plan> {
 
 /// Serializes credential fetches across processes: tools start several `pai token` at once,
 /// and each device may only collect a few credentials a day.
+/// Removes the plain secrets file an older pai left beside the sealed one, once no proxy that
+/// older pai started can still be reading it (`Keystore::drop_plain_copy`).
+pub fn drop_plain_copy(env: &Env) -> Result<bool> {
+    let _lock = lock(env)?;
+    env.keystore.drop_plain_copy()
+}
+
 fn lock(env: &Env) -> Result<fs::File> {
     let dir = &env.paths.config_dir;
     fs::create_dir_all(dir).map_err(|e| io_err("create", dir, e))?;
@@ -975,7 +982,7 @@ pub struct Status {
     pub problems: Vec<String>,
 }
 
-const SETUP_HINT: &str = "Run the command from Account > Set up a coding tool in the DawonAI web app, or `pai pair <code> --setup <claude-code|codex|opencode|omp|hermes>`";
+const SETUP_HINT: &str = "Run the command from Account > Set up a coding tool in the DawonAI web app, or `pai pair <code> --setup <claude-code|claude-desktop|codex|codex-app|opencode|omp|hermes>`";
 
 pub fn status(env: &Env) -> Result<Status> {
     let config = env.config()?;
@@ -1055,7 +1062,7 @@ pub fn status(env: &Env) -> Result<Status> {
         problems.push("This pai has no pins for the model API, so its proxy won't connect. Install pai again.".to_string());
     }
     if harnesses.is_empty() {
-        problems.push("No harness is set up. Run `pai setup <claude-code|codex|opencode|omp|hermes> --apply`.".to_string());
+        problems.push("No harness is set up. Run `pai setup <claude-code|claude-desktop|codex|codex-app|opencode|omp|hermes> --apply`.".to_string());
     }
     Ok(Status {
         pass_key: has_pass_key(env),

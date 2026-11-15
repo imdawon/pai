@@ -187,7 +187,7 @@ fn run(command: Command) -> Result<(), Error> {
                 Err(e) => return Err(e),
             }
             let Some(tool) = harness else {
-                println!("Next: `pai setup <claude-code|codex|opencode|omp|hermes> --apply`, or `pai setup other` for any other harness.");
+                println!("Next: `pai setup <claude-code|claude-desktop|codex|codex-app|opencode|omp|hermes> --apply`, or `pai setup other` for any other harness.");
                 return Ok(());
             };
             println!();
